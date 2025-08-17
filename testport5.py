@@ -147,7 +147,7 @@ def get_value(df, possible_keys, col_index=0):
                  return pd.to_numeric(val, errors='coerce') if val is not None else np.nan
     return np.nan
 
-# --- SVD-based PSD Matrix Correction (Section 9.5) ---
+# Helper function required by the main function
 def nearest_psd_matrix(matrix):
     """
     Ensure a matrix is positive semi-definite using SVD for numerical stability.
@@ -169,9 +169,92 @@ def nearest_psd_matrix(matrix):
         psd_matrix = (psd_matrix + psd_matrix.T) / 2
         return psd_matrix
     except Exception as e:
+        # Fallback to identity matrix on error
         logging.error(f"Error in PSD correction: {e}")
-        return np.eye(len(matrix)) # Fallback to identity matrix
+        return np.eye(len(matrix))
 
+# The corrected function
+def calculate_robust_hedge_weights(
+    core_portfolio_returns, 
+    hedge_instrument_returns, 
+    lambda_uncertainty=0.5
+):
+    """
+    Calculates optimal hedge weights using a tracking error minimization framework
+    that accounts for beta estimation uncertainty (regularization).
+
+    Args:
+        core_portfolio_returns (pd.DataFrame): DataFrame of returns for the assets to be hedged.
+        hedge_instrument_returns (pd.DataFrame): DataFrame of returns for the hedging instruments.
+        lambda_uncertainty (float): A scalar to control the strength of the regularization.
+                                    Higher values mean more uncertainty and a more conservative hedge.
+
+    Returns:
+        pd.Series: A Series of optimal weights for the hedging instruments.
+    """
+    # 1. Align data and drop NaNs
+    common_index = core_portfolio_returns.index.intersection(hedge_instrument_returns.index)
+    if len(common_index) < 60: # Need sufficient data for stable estimates
+        logging.warning("Insufficient data for robust hedging. Returning zero weights.")
+        return pd.Series(0.0, index=hedge_instrument_returns.columns)
+        
+    y = core_portfolio_returns.loc[common_index]
+    X = hedge_instrument_returns.loc[common_index]
+    
+    # 2. Estimate Betas (B matrix) and Beta Uncertainty (Ω_β matrix)
+    betas = []
+    beta_variances = []
+
+    for stock in y.columns:
+        # For each stock, regress its returns against ALL hedge instruments
+        model = Ridge(alpha=0.1, fit_intercept=True).fit(X, y[stock])
+        betas.append(model.coef_)
+        
+        # Estimate uncertainty: Use the variance of the residuals from the regression
+        # This is a practical proxy for the standard error of the beta estimates
+        residuals = y[stock] - model.predict(X)
+        beta_variances.append(np.var(residuals))
+
+    # B is a matrix where each row corresponds to a stock and each column to a hedge factor
+    B = np.array(betas)
+    # Omega_beta is a diagonal matrix of our uncertainty proxies
+    Omega_beta = np.diag(beta_variances)
+
+    # 3. Construct the Components for the Optimal Hedge Formula
+    # Covariance matrix of the hedging instruments
+    Sigma_hedge = X.cov().values
+    
+    # The regularization term from the textbook: B' * Ω_β * B
+    regularizer = B.T @ Omega_beta @ B
+    
+    # The robust, regularized covariance matrix
+    # We scale the regularizer by lambda to control its influence
+    robust_Sigma = Sigma_hedge + (lambda_uncertainty * regularizer)
+    
+    # *** FIX: Calculate cross-covariance correctly ***
+    # Combine the dataframes to calculate the full covariance matrix
+    combined_df = pd.concat([y, X], axis=1)
+    full_cov_matrix = combined_df.cov()
+    # Select the block representing the covariance between core assets (y) and hedge instruments (X)
+    Sigma_core_hedge = full_cov_matrix.loc[y.columns, X.columns].values
+    
+    # Sum of the covariances for the aggregate portfolio
+    # This is equivalent to assuming an equal-weighted portfolio of the core assets
+    # For a weighted portfolio, you would do: Sigma_core_hedge.T @ core_weights
+    sum_covariances = np.sum(Sigma_core_hedge, axis=0)
+    
+    # 4. Solve for Optimal Hedge Weights
+    # The solution is w_hedge = (Robust_Sigma)^-1 * (sum_covariances)
+    try:
+        inv_robust_Sigma = np.linalg.inv(nearest_psd_matrix(robust_Sigma))
+        # The optimal position is the negative of this result
+        optimal_hedge_weights = -1 * inv_robust_Sigma @ sum_covariances
+        
+        return pd.Series(optimal_hedge_weights, index=X.columns)
+        
+    except np.linalg.LinAlgError:
+        logging.error("Robust hedging failed due to singular matrix. Returning zero weights.")
+        return pd.Series(0.0, index=X.columns)
 
 # --- Deep Dive Data Functions (for UI) ---
 @st.cache_data
@@ -580,83 +663,7 @@ def recalculate_relative_z_scores(top_15_df, etf_histories, period="3y", window=
             logging.error(f"Error recalculating Z-Score for {ticker}: {str(e)}")
             
     return relative_z_scores    
-def calculate_robust_hedge_weights(
-    core_portfolio_returns, 
-    hedge_instrument_returns, 
-    lambda_uncertainty=0.5
-):
-    """
-    Calculates optimal hedge weights using a tracking error minimization framework
-    that accounts for beta estimation uncertainty (regularization).
 
-    Args:
-        core_portfolio_returns (pd.DataFrame): DataFrame of returns for the assets to be hedged.
-        hedge_instrument_returns (pd.DataFrame): DataFrame of returns for the hedging instruments.
-        lambda_uncertainty (float): A scalar to control the strength of the regularization.
-                                    Higher values mean more uncertainty and a more conservative hedge.
-
-    Returns:
-        pd.Series: A Series of optimal weights for the hedging instruments.
-    """
-    # 1. Align data and drop NaNs
-    common_index = core_portfolio_returns.index.intersection(hedge_instrument_returns.index)
-    if len(common_index) < 60: # Need sufficient data for stable estimates
-        logging.warning("Insufficient data for robust hedging. Returning zero weights.")
-        return pd.Series(0.0, index=hedge_instrument_returns.columns)
-        
-    y = core_portfolio_returns.loc[common_index]
-    X = hedge_instrument_returns.loc[common_index]
-    
-    # 2. Estimate Betas (B matrix) and Beta Uncertainty (Ω_β matrix)
-    betas = []
-    beta_variances = []
-
-    for stock in y.columns:
-        # For each stock, regress its returns against ALL hedge instruments
-        model = Ridge(alpha=0.1, fit_intercept=True).fit(X, y[stock])
-        betas.append(model.coef_)
-        
-        # Estimate uncertainty: Use the variance of the residuals from the regression
-        # This is a practical proxy for the standard error of the beta estimates
-        residuals = y[stock] - model.predict(X)
-        beta_variances.append(np.var(residuals))
-
-    # B is a matrix where each row corresponds to a stock and each column to a hedge factor
-    B = np.array(betas)
-    # Omega_beta is a diagonal matrix of our uncertainty proxies
-    Omega_beta = np.diag(beta_variances)
-
-    # 3. Construct the Components for the Optimal Hedge Formula
-    # Covariance matrix of the hedging instruments
-    Sigma_hedge = X.cov().values
-    
-    # The regularization term from the textbook: B' * Ω_β * B
-    regularizer = B.T @ Omega_beta @ B
-    
-    # The robust, regularized covariance matrix
-    # We scale the regularizer by lambda to control its influence
-    robust_Sigma = Sigma_hedge + (lambda_uncertainty * regularizer)
-    
-    # Covariance between the core assets and the hedge instruments
-    Sigma_core_hedge = y.cov(X).values
-
-    # Sum of the covariances for the aggregate portfolio
-    # This is equivalent to assuming an equal-weighted portfolio of the core assets
-    # For a weighted portfolio, you would do: Sigma_core_hedge.T @ core_weights
-    sum_covariances = np.sum(Sigma_core_hedge, axis=0)
-    
-    # 4. Solve for Optimal Hedge Weights
-    # The solution is w_hedge = (Robust_Sigma)^-1 * (sum_covariances)
-    try:
-        inv_robust_Sigma = np.linalg.inv(nearest_psd_matrix(robust_Sigma))
-        # The optimal position is the negative of this result
-        optimal_hedge_weights = -1 * inv_robust_Sigma @ sum_covariances
-        
-        return pd.Series(optimal_hedge_weights, index=X.columns)
-        
-    except np.linalg.LinAlgError:
-        logging.error("Robust hedging failed due to singular matrix. Returning zero weights.")
-        return pd.Series(0.0, index=X.columns)
 def calculate_piotroski_f_score(financials, balancesheet, cashflow, total_assets, roa, net_income):
     score = 0
     try:
