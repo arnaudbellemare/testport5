@@ -322,7 +322,75 @@ def fetch_and_organize_deep_dive_data(_ticker_symbol):
             "Cash Flow": statement_to_df(cashflow),
         }
     except Exception as e: return {"Error": f"An error occurred: {e}"}
+def winsorize_returns(returns_dict, lookback_T=126, d_max=7.0):
+    """
+    Winsorizes returns based on the robust z-score method described in
+    "The Elements of Quantitative Investing".
 
+    d_{i,t} = |log(1 + r_it)| / median(|log(1 + r_{i,t-1})|, ..., |log(1 + r_{i,t-T})|)
+
+    Args:
+        returns_dict (dict): Dictionary where keys are tickers and values are pd.Series of log returns.
+        lookback_T (int): The lookback period (T) for the rolling median.
+        d_max (float): The threshold. Returns whose score exceeds this are capped.
+
+    Returns:
+        dict: A new dictionary with the winsorized log return series.
+    """
+    winsorized_dict = {}
+    total_winsorized_points = 0
+
+    for ticker, log_returns in returns_dict.items():
+        if log_returns.empty or len(log_returns) < lookback_T:
+            winsorized_dict[ticker] = log_returns
+            continue
+
+        # Use simple returns for the formula's r_it component
+        simple_returns = np.expm1(log_returns)
+        
+        # Calculate the absolute log returns for the median calculation
+        abs_log_returns = log_returns.abs()
+        
+        # Calculate the rolling median denominator from the formula
+        rolling_median_denom = abs_log_returns.rolling(window=lookback_T, min_periods=20).median().shift(1)
+        
+        
+        # Avoid division by zero and fill NaNs robustly
+        rolling_median_denom.replace(0, np.nan, inplace=True)
+        # FIX: Replaced deprecated .fillna(method=...) with .ffill()
+        rolling_median_denom.ffill(inplace=True)
+        # Backfill any remaining NaNs at the beginning of the series
+        rolling_median_denom.fillna(abs_log_returns.median(), inplace=True)
+        
+        # Calculate the d_it score for each point in time
+        d_it = abs_log_returns / rolling_median_denom
+        
+        # Identify outliers
+        outliers_mask = d_it > d_max
+        
+        if outliers_mask.any():
+            total_winsorized_points += outliers_mask.sum()
+            
+            # Create a copy to modify
+            winsorized_returns_series = log_returns.copy()
+            
+            # For each outlier, calculate the capped value
+            # Capped |log(1+r)| = d_max * median(...)
+            cap_value = d_max * rolling_median_denom[outliers_mask]
+            
+            # Preserve the original sign of the outlier return
+            signed_cap = np.sign(log_returns[outliers_mask]) * cap_value
+            
+            # Apply the cap
+            winsorized_returns_series[outliers_mask] = signed_cap
+            
+            winsorized_dict[ticker] = winsorized_returns_series
+        else:
+            # No outliers, just use the original series
+            winsorized_dict[ticker] = log_returns
+            
+    logging.info(f"Winsorization complete. Capped {total_winsorized_points} outlier data points across all tickers.")
+    return winsorized_dict
 def display_deep_dive_data(ticker_symbol):
     data = fetch_and_organize_deep_dive_data(ticker_symbol)
     if "Error" in data:
@@ -1969,7 +2037,9 @@ def main():
 
     with st.spinner(f"Processing {len(tickers)} tickers..."):
         results_df, failed_tickers, returns_dict = process_tickers(tickers, etf_histories, sector_etf_map)
-
+    with st.spinner("Applying Winsorization to clean return data..."):
+        winsorized_returns_dict = winsorize_returns(returns_dict, lookback_T=126, d_max=7.0)
+    st.success("Return data cleaned successfully.")
     if results_df.empty:
         st.error("Fatal Error: No tickers could be processed."); st.stop()
     st.success(f"Successfully processed {len(results_df)} tickers.")
@@ -2019,8 +2089,8 @@ def main():
 
     # --- Core Portfolio Construction (Long Book) ---
     st.subheader(f"Core Portfolio (Long Book): Weights by {weighting_method_ui}")
-    portfolio_returns_df = pd.DataFrame(returns_dict).reindex(columns=top_15_tickers).dropna(how='all')
-    _, cov_matrix = calculate_correlation_matrix(top_15_tickers, returns_dict, window=corr_window)
+    portfolio_returns_df = pd.DataFrame(winsorized_returns_dict).reindex(columns=top_15_tickers).dropna(how='all')
+    _, cov_matrix = calculate_correlation_matrix(top_15_tickers, winsorized_returns_dict, window=corr_window)
     method_map = {"Equal Weight": "equal", "Inverse Volatility": "inv_vol", "Log Log Sharpe Optimized": "log_log_sharpe"}
     p_weights = calculate_weights(portfolio_returns_df, method=method_map.get(weighting_method_ui, "equal"), cov_matrix=cov_matrix)
     weights_df = p_weights.reset_index(); weights_df.columns = ['Ticker', 'Weight']
