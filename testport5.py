@@ -1899,7 +1899,8 @@ def display_stock_dashboard(ticker_symbol, results_df, returns_dict, etf_histori
             display_valuation_wizard(ticker_symbol)
 
 ################################################################################
-# SECTION 2: MAIN APPLICATION LOGIC
+# SECTION 2: MAIN APPLICATION LOGIC (CORRECTED)
+################################################################################
 def main():
     st.title("Quantitative Portfolio Analysis")
     st.sidebar.header("Controls")
@@ -1919,7 +1920,7 @@ def main():
     )
     corr_window = st.sidebar.slider("Correlation Window (days)", min_value=30, max_value=180, value=90, step=30)
     
-    # --- NEW: UI Controls for Hedging ---
+    # --- UI Controls for Hedging ---
     st.sidebar.subheader("🛡️ Portfolio Hedging")
     hedge_risks = st.sidebar.multiselect(
         "Select Risks to Hedge",
@@ -1927,6 +1928,7 @@ def main():
         default=['SPY', 'QQQ'],
         help="Select market/factor ETFs to short to neutralize portfolio risk."
     )
+    # --- FIX: Re-added the missing lambda slider ---
     lambda_uncertainty_ui = st.sidebar.slider(
         "Hedging Conservatism (Lambda)", 
         min_value=0.1, max_value=5.0, value=0.5, step=0.1,
@@ -1951,10 +1953,7 @@ def main():
     # --- Automatic Factor Weighting ---
     st.sidebar.subheader("Automatic Factor Weighting")
     with st.spinner("Analyzing factor stability across multiple time horizons..."):
-        time_horizons = {
-            "1M": "Return_21d", "3M": "Return_63d",
-            "6M": "Return_126d", "12M": "Return_252d",
-        }
+        time_horizons = { "1M": "Return_21d", "3M": "Return_63d", "6M": "Return_126d", "12M": "Return_252d" }
         valid_metric_cols = [c for c in results_df.columns if pd.api.types.is_numeric_dtype(results_df[c]) and 'Return' not in c and c not in ['Ticker', 'Name', 'Score']]
         stability_results = {}
 
@@ -1967,20 +1966,13 @@ def main():
                     stability_results[horizon_label] = stability_df
         
         all_possible_metrics = list(default_weights.keys())
-        auto_weights, rationale_df = aggregate_stability_and_set_weights(
-            stability_results, all_possible_metrics, REVERSE_METRIC_NAME_MAP
-        )
+        auto_weights, rationale_df = aggregate_stability_and_set_weights(stability_results, all_possible_metrics, REVERSE_METRIC_NAME_MAP)
 
     with st.sidebar.expander("View Factor Stability Rationale", expanded=True):
         st.write("Weights are driven by a factor's **average performance** and **consistency** across 1, 3, 6, and 12-month return horizons. Higher scores are better.")
         st.dataframe(
             rationale_df[['avg_sharpe_coeff', 'consistency_score', 'horizons_present', 'Final_Weight']].loc[rationale_df['Final_Weight'] > 0.1].sort_values('Final_Weight', ascending=False),
-            column_config={
-                "avg_sharpe_coeff": st.column_config.NumberColumn("Avg Sharpe", help="Average signal-to-noise ratio of the factor's coefficient."),
-                "consistency_score": st.column_config.ProgressColumn("Consistency", help="How consistently the factor's signal had the same sign across all horizons.", format="%.2f", min_value=0, max_value=1),
-                "horizons_present": st.column_config.NumberColumn("Present In", help="Number of time horizons where this factor was significant."),
-                "Final_Weight": st.column_config.NumberColumn("Weight %", format="%.2f")
-            }
+            column_config={ "avg_sharpe_coeff": st.column_config.NumberColumn("Avg Sharpe"), "consistency_score": st.column_config.ProgressColumn("Consistency"), "horizons_present": st.column_config.NumberColumn("Present In"), "Final_Weight": st.column_config.NumberColumn("Weight %") }
         )
         
     user_weights = auto_weights
@@ -1990,7 +1982,7 @@ def main():
     for long_name, weight in user_weights.items():
         if weight > 0:
             short_name = REVERSE_METRIC_NAME_MAP.get(long_name)
-            if short_name in results_df.columns and short_name in rationale_df.index:
+            if short_name in results_df.columns and not rationale_df.empty and short_name in rationale_df.index:
                 rank_series = results_df[short_name].rank(pct=True)
                 if rationale_df.loc[short_name, 'avg_sharpe_coeff'] < 0:
                     rank_series = 1 - rank_series
@@ -2001,18 +1993,31 @@ def main():
     top_15_df = results_df.sort_values('Score', ascending=False).head(15).copy()
     top_15_tickers = top_15_df['Ticker'].tolist()
 
-    # --- Portfolio Overview ---
+    # --- Portfolio Overview & Hedging ---
     st.header("📈 Portfolio Overview & Hedging")
     if not top_15_tickers:
         st.warning("No stocks for portfolio construction.")
         st.stop()
 
+    # --- FIX: Moved Risk Dashboard to a more logical position ---
+    st.header("🔬 Long Book Risk Analysis")
+    with st.expander("Click to see the risk profile of the long-only portfolio"):
+        st.subheader("Sector Concentration")
+        sector_counts = top_15_df['Sector'].value_counts()
+        st.bar_chart(sector_counts)
+        st.subheader("Average Beta Exposure")
+        avg_beta_val = top_15_df['Beta_to_SPY'].mean()
+        st.metric("Average Beta of Long Book", f"{avg_beta_val:.2f}", help="A value > 1.5 suggests a highly volatile, market-sensitive portfolio.")
+        st.subheader("Dominant Factor Tilts")
+        factor_columns = ['Momentum', 'Value_Factor', 'Profitability_Factor', 'GARCH_Vol', 'Relative_Z_Score']
+        avg_factor_scores = top_15_df[factor_columns].mean()
+        st.write("Average Factor Scores (raw values):")
+        st.dataframe(avg_factor_scores)
+
     portfolio_returns_df = pd.DataFrame(returns_dict).reindex(columns=top_15_tickers).dropna(how='all')
     _, cov_matrix = calculate_correlation_matrix(top_15_tickers, returns_dict, window=corr_window)
-    cov_matrix = cov_matrix.loc[top_15_tickers, top_15_tickers]
-
-    # --- Existing momentum factor calculation (for certain weighting methods) ---
-    momentum_factor_returns = etf_histories['MTUM']['Close'].pct_change(fill_method=None).dropna()
+    
+    momentum_factor_returns = etf_histories['MTUM']['Close'].pct_change().dropna()
     common_idx = portfolio_returns_df.index.intersection(momentum_factor_returns.index)
     aligned_returns = portfolio_returns_df.loc[common_idx].copy().fillna(0.0)
     aligned_momentum = momentum_factor_returns.loc[common_idx].copy().fillna(0.0)
@@ -2020,15 +2025,23 @@ def main():
     betas = pd.DataFrame(index=top_15_tickers, columns=['Momentum_Beta'])
     for ticker in top_15_tickers:
         try:
-            model = LinearRegression().fit(aligned_momentum.values.reshape(-1, 1), aligned_returns[ticker].values)
+            model = LinearRegression().fit(aligned_momentum.values.reshape(-1, 1), aligned_returns.get(ticker, pd.Series(0.0, index=aligned_momentum.index)).values)
             betas.loc[ticker, 'Momentum_Beta'] = model.coef_[0]
         except Exception: betas.loc[ticker, 'Momentum_Beta'] = 1.0
 
-    # --- Core Portfolio Construction (Long Book) ---
+    # --- FIX: Corrected and unified the portfolio construction logic ---
     if new_factor != "None":
         st.subheader(f"Core Portfolio: FMP for {new_factor}")
-        # ... (Your existing FMP logic) ...
-        p_weights = ... # Ensure p_weights is defined here
+        factor_map = {"Value (IVE)": "IVE", "Growth (IVW)": "IVW", "Quality (QUAL)": "QUAL"}
+        factor_ticker = factor_map.get(new_factor)
+        if factor_ticker and factor_ticker in etf_histories:
+            factor_ts = etf_histories[factor_ticker]['Close'].pct_change().dropna()
+            p_weights = calculate_fmp_weights(aligned_returns, factor_ts, cov_matrix, existing_factors_returns=aligned_momentum.to_frame())
+            weights_df = p_weights.reset_index(); weights_df.columns = ['Ticker', 'Weight']
+        else: # Handle Vision synthetic or other cases
+            st.warning(f"FMP for {new_factor} is not yet implemented. Using Equal Weight.")
+            p_weights = pd.Series(1/len(top_15_tickers), index=top_15_tickers)
+            weights_df = p_weights.reset_index(); weights_df.columns = ['Ticker', 'Weight']
     else:
         st.subheader(f"Core Portfolio: Weights by {weighting_method_ui}")
         method_map = {"Equal Weight": "equal", "Inverse Volatility": "inv_vol", "Log Log Sharpe Optimized": "log_log_sharpe"}
@@ -2038,26 +2051,19 @@ def main():
             p_weights = calculate_weights(aligned_returns, method="alpha_orthogonal", betas=betas)
         else:
             p_weights = calculate_weights(aligned_returns, method=method_map.get(weighting_method_ui, "equal"), cov_matrix=cov_matrix)
-        
         weights_df = p_weights.reset_index(); weights_df.columns = ['Ticker', 'Weight']
-        weights_df = pd.merge(weights_df, top_15_df[['Ticker', 'Name']], on='Ticker', how='left')
-        st.dataframe(weights_df[['Ticker', 'Name', 'Weight']].sort_values("Weight", ascending=False), use_container_width=True)
+    
+    weights_df = pd.merge(weights_df, top_15_df[['Ticker', 'Name']], on='Ticker', how='left')
+    st.dataframe(weights_df[['Ticker', 'Name', 'Weight']].sort_values("Weight", ascending=False), use_container_width=True)
 
-    # --- NEW: Hedging Calculation and Display ---
+    # --- Hedging Calculation and Display ---
     hedge_weights = pd.Series(dtype=float)
     if hedge_risks:
         with st.spinner(f"Calculating robust hedge for {', '.join(hedge_risks)}..."):
-            hedge_instrument_returns_dict = {
-                etf: etf_histories[etf]['Close'].pct_change().dropna() 
-                for etf in hedge_risks if etf in etf_histories and not etf_histories[etf].empty
-            }
+            hedge_instrument_returns_dict = {etf: etf_histories[etf]['Close'].pct_change().dropna() for etf in hedge_risks if etf in etf_histories and not etf_histories[etf].empty}
             if hedge_instrument_returns_dict:
                 hedge_instrument_returns_df = pd.DataFrame(hedge_instrument_returns_dict)
-                hedge_weights = calculate_robust_hedge_weights(
-                    portfolio_returns_df, 
-                    hedge_instrument_returns_df,
-                    lambda_uncertainty=lambda_uncertainty_ui
-                )
+                hedge_weights = calculate_robust_hedge_weights(portfolio_returns_df, hedge_instrument_returns_df, lambda_uncertainty=lambda_uncertainty_ui)
 
     if not hedge_weights.empty:
         st.subheader("Optimal Hedge Portfolio (Short Book)")
@@ -2067,15 +2073,11 @@ def main():
         hedge_display_df.columns = ['Hedge Instrument', 'Weight']
         hedge_display_df['Weight %'] = hedge_display_df['Weight'] * 100 
         
-        st.dataframe(
-            hedge_display_df[['Hedge Instrument', 'Weight %']].sort_values('Weight %'),
-            use_container_width=True,
-            column_config={"Weight %": st.column_config.NumberColumn(format="%.2f%%")}
-        )
+        st.dataframe(hedge_display_df[['Hedge Instrument', 'Weight %']].sort_values('Weight %'), use_container_width=True, column_config={"Weight %": st.column_config.NumberColumn(format="%.2f%%")})
 
-        long_exposure = 1.0 # The core portfolio is normalized to 100%
+        long_exposure = 1.0
         short_exposure = hedge_weights.sum()
-        net_exposure = long_exposure + short_exposure # short_exposure is negative
+        net_exposure = long_exposure + short_exposure
         
         col1, col2, col3 = st.columns(3)
         col1.metric("Long Exposure", f"{long_exposure:.1%}")
@@ -2084,65 +2086,60 @@ def main():
     
     st.divider()
 
-    # --- Existing Portfolio Analysis (can be interpreted as post-hedge if desired) ---
-    weighted_df_calc = pd.DataFrame()
-    if 'weights_df' in locals():
-        if 'Weight' in weights_df.columns: weighted_df_calc = weights_df[['Ticker', 'Weight']].copy()
-        elif 'FMP Weight' in weights_df.columns: weighted_df_calc = weights_df[['Ticker', 'FMP Weight']].rename(columns={'FMP Weight': 'Weight'}).copy()
-
-    if not weighted_df_calc.empty:
-        corrs = calculate_portfolio_factor_correlations(weighted_df_calc, etf_histories)
-        best_etf, best_corr = (corrs.index[0], corrs.iloc[0]) if not corrs.empty else ('SPY', np.nan)
-        z, _ = calculate_portfolio_relative_z_score(weighted_df_calc, etf_histories, best_etf)
-        st.write(f"**Core Portfolio Top-Correlated ETF:** `{best_etf}` (Correlation: {best_corr:.4f})")
-        st.write(f"**Core Portfolio Relative Z-Score vs {best_etf}:** {z:.4f}")
-
-    if 'p_weights' in locals() and p_weights is not None:
+    # --- Portfolio Performance Metrics ---
+    # FIX: Simplified this block and ensured it runs correctly
+    if 'p_weights' in locals() and p_weights is not None and not p_weights.empty:
         aligned_w = p_weights.reindex(aligned_returns.columns).fillna(0)
         final_returns = (aligned_returns * aligned_w).sum(axis=1)
-        scores = top_15_df.set_index('Ticker').loc[aligned_returns.columns]['Score']
-        alpha_weights = scores / scores.sum()
-        forecast_ts_unlagged = (aligned_returns * alpha_weights).sum(axis=1)
-        lagged_forecast_ts = forecast_ts_unlagged.shift(1)
-        malv, _ = calculate_mahalanobis_metrics(aligned_returns, cov_matrix)
-        ic, ir = calculate_information_metrics(lagged_forecast_ts, final_returns)
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Precision Matrix Quality (MALV)", f"{malv:.4f}", help=f"Expected: {2/len(top_15_tickers):.4f}")
-        col2.metric("Information Coefficient (IC)", f"{ic:.4f}", help="Lagged correlation of alpha vs returns.")
-        col3.metric("Information Ratio (IR)", f"{ir:.4f}", help="Risk-adjusted return (Sharpe).")
+        
+        # Ensure scores are aligned with returns data
+        valid_tickers_for_metrics = aligned_returns.columns
+        scores = top_15_df[top_15_df['Ticker'].isin(valid_tickers_for_metrics)].set_index('Ticker')['Score']
+        
+        if not scores.empty and scores.sum() != 0:
+            alpha_weights = scores / scores.sum()
+            forecast_ts_unlagged = (aligned_returns * alpha_weights).sum(axis=1)
+            lagged_forecast_ts = forecast_ts_unlagged.shift(1)
+            
+            malv, _ = calculate_mahalanobis_metrics(aligned_returns, cov_matrix.loc[valid_tickers_for_metrics, valid_tickers_for_metrics])
+            ic, ir = calculate_information_metrics(lagged_forecast_ts, final_returns)
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Precision Matrix Quality (MALV)", f"{malv:.4f}", help=f"Expected: {2/len(valid_tickers_for_metrics):.4f}")
+            col2.metric("Information Coefficient (IC)", f"{ic:.4f}", help="Lagged correlation of alpha vs returns.")
+            col3.metric("Information Ratio (IR)", f"{ir:.4f}", help="Risk-adjusted return (Sharpe).")
 
     # --- Detailed Report Tabs ---
     st.header("📊 Detailed Reports")
     st.sidebar.divider(); st.sidebar.header("Individual Stock Analysis")
-    
     options = sorted(results_df['Ticker'].unique().tolist())
-    default_ticker = top_15_df['Ticker'].iloc[0] if not top_15_df.empty and top_15_df['Ticker'].iloc[0] in options else options[0] if options else None
+    default_ticker = top_15_df['Ticker'].iloc[0] if not top_15_df.empty and top_15_df['Ticker'].iloc[0] in options else (options[0] if options else None)
     
-    selected_ticker = st.sidebar.selectbox(
-        "Select a Ticker", 
-        options=options, 
-        index=options.index(default_ticker) if default_ticker else 0
-    )
-    
-    tab1, tab2, tab3 = st.tabs(["🔬 Stock Dashboard & Financials", "🎛️ Factor Analysis", "📄 Full Data Table"])
-    with tab1:
-        if selected_ticker:
-            display_stock_dashboard(selected_ticker, results_df, returns_dict, etf_histories)
-            display_deep_dive_data(selected_ticker)
-    with tab2:
-        st.subheader("Pure Factor Returns (Aggregated & Individual Horizons)")
-        st.write("#### Aggregated Factor Performance")
-        st.dataframe(rationale_df)
+    if default_ticker:
+        selected_ticker = st.sidebar.selectbox(
+            "Select a Ticker", 
+            options=options, 
+            index=options.index(default_ticker)
+        )
         
-        for horizon_label, stability_df in stability_results.items():
-             with st.expander(f"Details for {horizon_label} Horizon (Target: {time_horizons[horizon_label]})"):
-                 if not stability_df.empty:
-                     st.dataframe(stability_df)
-                 else:
-                     st.warning(f"No significant factors found for the {horizon_label} horizon.")
-    with tab3:
-        st.subheader("Full Processed Data Table")
-        st.dataframe(results_df)
+        tab1, tab2, tab3 = st.tabs(["🔬 Stock Dashboard & Financials", "🎛️ Factor Analysis", "📄 Full Data Table"])
+        with tab1:
+            if selected_ticker:
+                display_stock_dashboard(selected_ticker, results_df, returns_dict, etf_histories)
+                display_deep_dive_data(selected_ticker)
+        with tab2:
+            st.subheader("Pure Factor Returns (Aggregated & Individual Horizons)")
+            st.write("#### Aggregated Factor Performance")
+            st.dataframe(rationale_df)
+            for horizon_label, stability_df in stability_results.items():
+                 with st.expander(f"Details for {horizon_label} Horizon (Target: {time_horizons[horizon_label]})"):
+                     if not stability_df.empty:
+                         st.dataframe(stability_df)
+                     else:
+                         st.warning(f"No significant factors found for the {horizon_label} horizon.")
+        with tab3:
+            st.subheader("Full Processed Data Table")
+            st.dataframe(results_df)
 
 if __name__ == "__main__":
     main()
