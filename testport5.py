@@ -1937,6 +1937,8 @@ def display_stock_dashboard(ticker_symbol, results_df, returns_dict, etf_histori
 ################################################################################
 # SECTION 2: MAIN APPLICATION LOGIC (COMPLETE AND CORRECTED)
 ################################################################################
+# SECTION 2: MAIN APPLICATION LOGIC (FULLY CORRECTED WITH CACHING AND BUG FIXES)
+################################################################################
 def main():
     st.title("Quantitative Portfolio Analysis")
     st.sidebar.header("Controls")
@@ -1944,34 +1946,20 @@ def main():
         st.cache_data.clear()
         st.rerun()
 
-    # --- UI Controls for Portfolio Construction ---
+    # --- UI Controls ---
     st.sidebar.subheader("Portfolio Construction")
     weighting_method_ui = st.sidebar.selectbox(
         "Portfolio Weighting Method",
         ["Equal Weight", "Inverse Volatility", "Log Log Sharpe Optimized"]
     )
-    risk_weight_ui = st.sidebar.slider(
-        "Risk Penalty Weight in Scoring", 0.0, 0.5, 0.2, 0.05,
-        help="How much to penalize stocks for high volatility and debt in the initial ranking. 0 = no penalty."
-    )
-    corr_window = st.sidebar.slider("Correlation Window (days)", min_value=30, max_value=180, value=90, step=30)
+    corr_window = st.sidebar.slider("Correlation Window (days)", 30, 180, 90, 30)
     
-    # --- UI Controls for Hedging ---
     st.sidebar.subheader("🛡️ Portfolio Hedging")
     hedge_risks = st.sidebar.multiselect(
-        "Select Risks to Hedge",
-        options=etf_list,
-        default=['SPY', 'QQQ'],
-        help="Select market/factor ETFs to short to neutralize portfolio risk."
+        "Select Risks to Hedge", options=etf_list, default=['SPY', 'QQQ']
     )
-    target_net_exposure_ui = st.sidebar.slider(
-        "Target Net Exposure (%)", -100.0, 100.0, 0.0, 5.0,
-        help="Set your desired final market exposure. 0% is market-neutral. Negative is bearish, positive is bullish."
-    ) / 100.0
     lambda_uncertainty_ui = st.sidebar.slider(
-        "Hedging Conservatism (Lambda)", 
-        min_value=0.1, max_value=5.0, value=0.5, step=0.1,
-        help="Controls how much we distrust our beta estimates. Higher = more conservative (smaller) hedge."
+        "Hedging Conservatism (Lambda)", 0.1, 5.0, 0.5, 0.1
     )
 
     # --- Data Fetching and Processing ---
@@ -1979,35 +1967,30 @@ def main():
         etf_histories = fetch_all_etf_histories(etf_list)
     st.success("ETF histories loaded.")
 
-    with st.spinner(f"Processing {len(tickers)} tickers... This may take several minutes."):
+    with st.spinner(f"Processing {len(tickers)} tickers..."):
         results_df, failed_tickers, returns_dict = process_tickers(tickers, etf_histories, sector_etf_map)
 
     if results_df.empty:
-        st.error("Fatal Error: No tickers could be processed.")
-        st.stop()
+        st.error("Fatal Error: No tickers could be processed."); st.stop()
     st.success(f"Successfully processed {len(results_df)} tickers.")
     if failed_tickers:
         st.expander("Show Failed Tickers").warning(f"{len(failed_tickers)} tickers failed: {', '.join(failed_tickers)}")
 
     # --- Automatic Factor Weighting (Cached) ---
     st.sidebar.subheader("Automatic Factor Weighting")
-    with st.spinner("Analyzing factor stability... (This is slow only on the first run)"):
+    with st.spinner("Analyzing factor stability... (Slow only on first run)"):
         all_possible_metrics = list(default_weights.keys())
         auto_weights, rationale_df, stability_results = run_factor_stability_analysis(
-            results_df, 
-            all_possible_metrics, 
-            REVERSE_METRIC_NAME_MAP
+            results_df, all_possible_metrics, REVERSE_METRIC_NAME_MAP
         )
 
     with st.sidebar.expander("View Factor Stability Rationale", expanded=True):
-        st.dataframe(
-            rationale_df[['avg_sharpe_coeff', 'consistency_score', 'Final_Weight']].loc[rationale_df['Final_Weight'] > 0.1].sort_values('Final_Weight', ascending=False),
-            column_config={ "avg_sharpe_coeff": st.column_config.NumberColumn("Avg Sharpe"), "consistency_score": st.column_config.ProgressColumn("Consistency"), "Final_Weight": st.column_config.NumberColumn("Weight %") }
-        )
+        st.dataframe(rationale_df[['avg_sharpe_coeff', 'consistency_score', 'Final_Weight']].loc[rationale_df['Final_Weight'] > 0.1].sort_values('Final_Weight', ascending=False))
+        
     user_weights = auto_weights
     
-    # --- Risk-Managed Scoring Block ---
-    alpha_score = pd.Series(0.0, index=results_df.index)
+    # --- Scoring Block ---
+    raw_score = pd.Series(0.0, index=results_df.index)
     for long_name, weight in user_weights.items():
         if weight > 0:
             short_name = REVERSE_METRIC_NAME_MAP.get(long_name)
@@ -2015,29 +1998,24 @@ def main():
                 rank_series = results_df.groupby('Sector')[short_name].rank(pct=True)
                 if rationale_df.loc[short_name, 'avg_sharpe_coeff'] < 0:
                     rank_series = 1 - rank_series
-                alpha_score += rank_series.fillna(0.5) * weight
-    risk_factors = {'GARCH_Vol': 1.0, 'Debt_Ratio': 0.5}
-    risk_score = pd.Series(0.0, index=results_df.index)
-    for factor, weight in risk_factors.items():
-        risk_score += results_df[factor].rank(pct=True).fillna(0.5) * weight
-    final_raw_score = alpha_score * (1 - risk_weight_ui) - risk_score * risk_weight_ui
+                raw_score += rank_series.fillna(0.5) * weight
+
     def z_score(series): return (series - series.mean()) / (series.std() if series.std() > 0 else 1)
-    results_df['Score'] = z_score(final_raw_score)
+    results_df['Score'] = z_score(raw_score)
     top_15_df = results_df.sort_values('Score', ascending=False).head(15).copy()
     top_15_tickers = top_15_df['Ticker'].tolist()
 
     # --- Portfolio Overview & Hedging ---
     st.header("📈 Portfolio Overview & Hedging")
     if not top_15_tickers:
-        st.warning("No stocks for portfolio construction.")
-        st.stop()
+        st.warning("No stocks for portfolio construction."); st.stop()
         
     with st.expander("🔬 View Long Book Risk Analysis"):
         st.subheader("Sector Concentration")
         st.bar_chart(top_15_df['Sector'].value_counts())
         st.subheader("Average Beta Exposure")
         avg_beta_val = top_15_df['Beta_to_SPY'].mean()
-        st.metric("Average Beta of Long Book", f"{avg_beta_val:.2f}", help="A value > 1.5 suggests a highly volatile, market-sensitive portfolio.")
+        st.metric("Average Beta of Long Book", f"{avg_beta_val:.2f}")
 
     # --- Core Portfolio Construction (Long Book) ---
     st.subheader(f"Core Portfolio (Long Book): Weights by {weighting_method_ui}")
@@ -2049,7 +2027,7 @@ def main():
     weights_df = pd.merge(weights_df, top_15_df[['Ticker', 'Name']], on='Ticker', how='left')
     st.dataframe(weights_df[['Ticker', 'Name', 'Weight']].sort_values("Weight", ascending=False), use_container_width=True)
 
-    # --- Hedging Calculation and Display with Scaling ---
+    # --- Hedging Calculation and Display ---
     hedge_weights = pd.Series(dtype=float)
     if hedge_risks:
         with st.spinner(f"Calculating robust hedge for {', '.join(hedge_risks)}..."):
@@ -2059,46 +2037,44 @@ def main():
                 hedge_weights = calculate_robust_hedge_weights(portfolio_returns_df, hedge_instrument_returns_df, lambda_uncertainty=lambda_uncertainty_ui)
 
     if not hedge_weights.empty:
-        st.subheader("Hedge Portfolio & Final Exposure")
-        long_exposure = 1.0
-        current_short_exposure = hedge_weights.sum()
-        scaled_hedge_weights = hedge_weights.copy()
-        if current_short_exposure != 0:
-            scaling_factor = (target_net_exposure_ui - long_exposure) / current_short_exposure
-            scaling_factor = max(0, scaling_factor)
-            scaled_hedge_weights = hedge_weights * scaling_factor
-        short_exposure = scaled_hedge_weights.sum()
-        net_exposure = long_exposure + short_exposure
-        hedge_display_df = scaled_hedge_weights.reset_index()
-        hedge_display_df.columns = ['Hedge Instrument', 'Weight']
+        st.subheader("Optimal Hedge Portfolio (Short Book)")
+        hedge_display_df = hedge_weights.reset_index(); hedge_display_df.columns = ['Hedge Instrument', 'Weight']
         hedge_display_df['Weight %'] = hedge_display_df['Weight'] * 100 
-        st.write("These are the **scaled short** positions required to meet your target net exposure.")
-        st.dataframe(hedge_display_df[['Hedge Instrument', 'Weight %']].sort_values('Weight %'), use_container_width=True)
+        st.dataframe(hedge_display_df[['Hedge Instrument', 'Weight %']].sort_values('Weight %'), use_container_width=True, column_config={"Weight %": st.column_config.NumberColumn(format="%.2f%%")})
+        long_exposure = 1.0; short_exposure = hedge_weights.sum(); net_exposure = long_exposure + short_exposure
         col1, col2, col3 = st.columns(3)
         col1.metric("Long Exposure", f"{long_exposure:.1%}")
         col2.metric("Short Exposure (Hedge)", f"{short_exposure:.1%}")
-        col3.metric("Net Exposure", f"{net_exposure:.1%}", help="This now reflects the target you set in the sidebar.")
+        col3.metric("Net Exposure", f"{net_exposure:.1%}")
     
     st.divider()
 
-    # --- Portfolio Performance Metrics ---
+    # --- FIX: CORRECTED Portfolio Performance Metrics block ---
     st.subheader("📊 Portfolio Strategy Performance Metrics")
-    aligned_returns = portfolio_returns_df.loc[common_idx].copy().fillna(0.0) # Using a common aligned returns df
-    valid_tickers_for_metrics = aligned_returns.columns
-    aligned_w = p_weights.reindex(valid_tickers_for_metrics).fillna(0)
-    final_returns = (aligned_returns * aligned_w).sum(axis=1)
-    aligned_scores = top_15_df[top_15_df['Ticker'].isin(valid_tickers_for_metrics)].set_index('Ticker')['Score']
-    if not aligned_scores.empty and aligned_scores.sum() != 0:
-        alpha_weights = aligned_scores / aligned_scores.sum()
-        forecast_ts_unlagged = (aligned_returns * alpha_weights).sum(axis=1)
-        lagged_forecast_ts = forecast_ts_unlagged.shift(1)
-        aligned_cov_matrix = cov_matrix.loc[valid_tickers_for_metrics, valid_tickers_for_metrics]
-        malv, _ = calculate_mahalanobis_metrics(aligned_returns, aligned_cov_matrix)
-        ic, ir = calculate_information_metrics(lagged_forecast_ts, final_returns)
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Precision Matrix Quality (MALV)", f"{malv:.4f}", help=f"Expected: {2/len(valid_tickers_for_metrics):.4f}")
-        col2.metric("Information Coefficient (IC)", f"{ic:.4f}", help="Lagged correlation of alpha vs returns.")
-        col3.metric("Information Ratio (IR)", f"{ir:.4f}", help="Risk-adjusted return (Sharpe).")
+    # Define aligned_returns here, which also defines common_idx for downstream use
+    spy_returns = etf_histories['SPY']['Close'].pct_change().dropna()
+    common_idx = portfolio_returns_df.index.intersection(spy_returns.index)
+    aligned_returns = portfolio_returns_df.loc[common_idx].copy().fillna(0.0)
+
+    if not aligned_returns.empty and p_weights is not None and not p_weights.empty:
+        valid_tickers_for_metrics = aligned_returns.columns
+        aligned_w = p_weights.reindex(valid_tickers_for_metrics).fillna(0)
+        final_returns = (aligned_returns * aligned_w).sum(axis=1)
+        aligned_scores = top_15_df[top_15_df['Ticker'].isin(valid_tickers_for_metrics)].set_index('Ticker')['Score']
+        
+        if not aligned_scores.empty and aligned_scores.sum() != 0:
+            alpha_weights = aligned_scores / aligned_scores.sum()
+            forecast_ts_unlagged = (aligned_returns * alpha_weights).sum(axis=1)
+            lagged_forecast_ts = forecast_ts_unlagged.shift(1)
+            
+            aligned_cov_matrix = cov_matrix.loc[valid_tickers_for_metrics, valid_tickers_for_metrics]
+            malv, _ = calculate_mahalanobis_metrics(aligned_returns, aligned_cov_matrix)
+            ic, ir = calculate_information_metrics(lagged_forecast_ts, final_returns)
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Precision Matrix Quality (MALV)", f"{malv:.4f}", help=f"Expected: {2/len(valid_tickers_for_metrics):.4f}")
+            col2.metric("Information Coefficient (IC)", f"{ic:.4f}", help="Lagged correlation of alpha vs returns.")
+            col3.metric("Information Ratio (IR)", f"{ir:.4f}", help="Risk-adjusted return (Sharpe).")
 
     # --- Detailed Report Tabs ---
     st.header("📑 Detailed Reports")
@@ -2117,7 +2093,7 @@ def main():
             st.dataframe(rationale_df)
             time_horizons_display = { "1M": "Return_21d", "3M": "Return_63d", "6M": "Return_126d", "12M": "Return_252d" }
             for horizon_label, stability_df in stability_results.items():
-                 with st.expander(f"Details for {horizon_label} Horizon (Target: {time_horizons_display[horizon_label]})"):
+                 with st.expander(f"Details for {horizon_label} Horizon (Target: {time_horizons_display.get(horizon_label, '')})"):
                      if not stability_df.empty: st.dataframe(stability_df)
                      else: st.warning(f"No significant factors found for {horizon_label} horizon.")
         with tab3:
