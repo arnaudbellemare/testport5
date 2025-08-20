@@ -2130,7 +2130,9 @@ def display_stock_dashboard(ticker_symbol, results_df, returns_dict, etf_histori
 # SECTION 2: MAIN APPLICATION LOGIC (COMPLETE AND FINAL)
 ################################################################################
 ################################################################################
-# SECTION 2: MAIN APPLICATION LOGIC (COMPLETE, WITH ALL METRICS RESTORED)
+# SECTION 2: MAIN APPLICATION LOGIC (COMPLETE - UNCONSTRAINED PURE ALPHA STRATEGY)
+################################################################################
+# SECTION 2: MAIN APPLICATION LOGIC (COMPLETE - UNCONSTRAINED PURE ALPHA STRATEGY)
 ################################################################################
 def main():
     st.title("Quantitative Portfolio Analysis")
@@ -2190,16 +2192,19 @@ def main():
         
     user_weights = auto_weights
     
-    # --- Scoring Block (Pure Alpha) ---
+    # --- SCORING BLOCK (UNCONSTRAINED PURE ALPHA) ---
     alpha_score = pd.Series(0.0, index=results_df.index)
     for long_name, weight in user_weights.items():
         if weight > 0:
             short_name = REVERSE_METRIC_NAME_MAP.get(long_name)
             if short_name in results_df.columns and not rationale_df.empty and short_name in rationale_df.index:
-                rank_series = results_df.groupby('Sector')[short_name].rank(pct=True)
+                # --- KEY CHANGE: Ranking across the entire universe (no groupby('Sector')) ---
+                rank_series = results_df[short_name].rank(pct=True)
+                
                 if rationale_df.loc[short_name, 'avg_sharpe_coeff'] < 0:
                     rank_series = 1 - rank_series
                 alpha_score += rank_series.fillna(0.5) * weight
+
     def z_score(series): return (series - series.mean()) / (series.std() if series.std() > 0 else 1)
     results_df['Score'] = z_score(alpha_score)
     top_15_df = results_df.sort_values('Score', ascending=False).head(15).copy()
@@ -2236,7 +2241,7 @@ def main():
                 factor_fig = plot_factor_correlations(factor_correlations.head(10))
                 st.plotly_chart(factor_fig, use_container_width=True)
 
-    # --- Hedging Calculation and Display ---
+    # --- Hedging Calculation and Display with Scaling ---
     hedge_weights = pd.Series(dtype=float)
     if hedge_risks:
         with st.spinner(f"Calculating robust hedge for {', '.join(hedge_risks)}..."):
@@ -2264,7 +2269,7 @@ def main():
     
     st.divider()
     
-    # --- RESTORED: Portfolio Performance Metrics ---
+    # --- Portfolio Performance Metrics ---
     st.subheader("📊 Portfolio Strategy Performance Metrics")
     spy_returns = etf_histories['SPY']['Close'].pct_change().dropna()
     common_idx = portfolio_returns_df.index.intersection(spy_returns.index)
@@ -2285,38 +2290,6 @@ def main():
             col1.metric("Precision Matrix Quality (MALV)", f"{malv:.4f}", help=f"Expected: {2/len(valid_tickers_for_metrics):.4f}")
             col2.metric("Information Coefficient (IC)", f"{ic:.4f}", help="Lagged correlation of alpha vs returns.")
             col3.metric("Information Ratio (IR)", f"{ir:.4f}", help="Risk-adjusted return (Sharpe).")
-
-    # --- NEW: Portfolio Risk Decomposition Section ---
-    st.subheader("🔬 Portfolio Risk Decomposition")
-    with st.spinner("Decomposing portfolio risk..."):
-        factor_returns_df = pd.DataFrame({etf: etf_histories[etf]['Close'].pct_change() for etf in factor_etfs}).dropna()
-        factor_cov = factor_returns_df.cov() * 252
-        
-        total_var, sys_var, spec_var = decompose_portfolio_risk(portfolio_returns_df, weights_df, factor_returns_df, factor_cov)
-        
-        if pd.notna(total_var) and total_var > 0:
-            total_vol = np.sqrt(total_var)
-            sys_pct = (sys_var / total_var) * 100
-            spec_pct = (spec_var / total_var) * 100
-
-            col1, col2 = st.columns([0.6, 0.4])
-            with col1:
-                st.metric("Total Portfolio Volatility (Annualized)", f"{total_vol:.2%}")
-                risk_data = pd.DataFrame({'Risk Type': ['Systematic (Factor) Risk', 'Idiosyncratic (Stock-Specific) Risk'], 'Percentage': [sys_pct, spec_pct]})
-                fig = px.pie(risk_data, values='Percentage', names='Risk Type', title='Sources of Portfolio Risk', hole=.4, color_discrete_sequence=['#636EFA', '#00CC96'])
-                fig.update_traces(textinfo='percent+label', pull=[0.05, 0])
-                fig.update_layout(template='plotly_dark', showlegend=False, title_x=0.5)
-                st.plotly_chart(fig, use_container_width=True)
-            with col2:
-                st.write("#### Interpretation")
-                st.markdown(f"**Systematic Risk ({sys_pct:.1f}%)**: This portion of your portfolio's risk comes from its exposure to broad market factors (Value, Growth, Momentum, etc.). It cannot be diversified away without hedging.")
-                st.markdown(f"**Idiosyncratic Risk ({spec_pct:.1f}%)**: This portion comes from the unique, company-specific risks of your individual stock picks. This is the risk you are taking in pursuit of **'alpha'.**")
-                if spec_pct > 50:
-                    st.success("A high idiosyncratic risk percentage suggests the portfolio's fate is driven more by your unique stock selections than by broad market movements.")
-                else:
-                    st.warning("A high systematic risk percentage suggests the portfolio's performance is heavily influenced by broad market factor trends.")
-        else:
-            st.warning("Could not perform risk decomposition.")
 
     # --- Detailed Report Tabs ---
     st.header("📑 Detailed Reports")
