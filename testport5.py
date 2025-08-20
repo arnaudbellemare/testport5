@@ -893,17 +893,35 @@ def calculate_volatility_adjusted_z_score(prices, period=252, ticker="Unknown", 
 
     return robust_z
 
-def fetch_macro_data(start_date, end_date):
-    # Fetch 10-Year Treasury Yield (Interest Rates)
-    ten_year_yield = web.DataReader('DGS10', 'fred', start_date, end_date)
-    # Fetch Financial Stress Index (e.g., St. Louis Fed's)
-    stress_index = web.DataReader('STLFSI3', 'fred', start_date, end_date)
-    # Fetch CPI (Inflation)
-    inflation = web.DataReader('CPIAUCSL', 'fred', start_date, end_date).pct_change(12) * 100
-    
-    macro_df = pd.concat([ten_year_yield, stress_index, inflation], axis=1).ffill()
-    macro_df.columns = ['Interest_Rate', 'Stress_Index', 'Inflation']
-    return macro_df
+
+@st.cache_data
+def fetch_macro_data(start_date="2018-01-01"):
+    """
+    Fetches key macroeconomic time-series data from the FRED database.
+    This version uses a default start date and calculates the end date automatically.
+    """
+    try:
+        # Calculate end_date inside the function
+        end_date = datetime.now()
+        
+        # Fetch 10-Year Treasury Yield (Interest Rates)
+        ten_year_yield = web.DataReader('DGS10', 'fred', start_date, end_date)
+        # Fetch St. Louis Fed Financial Stress Index (centered at 0)
+        stress_index = web.DataReader('STLFSI3', 'fred', start_date, end_date)
+        
+        macro_df = pd.concat([ten_year_yield, stress_index], axis=1)
+        macro_df.columns = ['Interest_Rate', 'Stress_Index']
+        
+        # Forward-fill to handle non-trading days, then back-fill any initial NaNs
+        macro_df = macro_df.ffill().bfill()
+        
+        logging.info("Successfully fetched macroeconomic data.")
+        return macro_df
+    except Exception as e:
+        logging.error(f"Failed to fetch macro data: {e}")
+        # Return a dummy dataframe on failure to prevent crashes
+        date_range = pd.date_range(start=start_date, end=datetime.now())
+        return pd.DataFrame(0, index=date_range, columns=['Interest_Rate', 'Stress_Index'])
 def _run_analysis_on_subset(_data_subset, _all_possible_metrics, _reverse_metric_map):
     """
     Helper function to run the core factor stability analysis on a given subset of data.
