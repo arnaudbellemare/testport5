@@ -1955,7 +1955,7 @@ def display_valuation_wizard(ticker_symbol):
         else:
             st.error(f"Valuation Failed. Reason: {commentary}")
 
-def get_correlated_stocks(selected_ticker, returns_dict, results_df, top_n=10):
+def get_correlated_stocks(selected_ticker, returns_dict, results_df, top_n=25):
     """
     Finds other tickers most correlated with the selected ticker.
     """
