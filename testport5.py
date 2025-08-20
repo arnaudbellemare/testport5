@@ -2082,6 +2082,8 @@ def display_stock_dashboard(ticker_symbol, results_df, returns_dict, etf_histori
 ################################################################################
 # SECTION 2: MAIN APPLICATION LOGIC (COMPLETE AND FINAL)
 ################################################################################
+# SECTION 2: MAIN APPLICATION LOGIC (COMPLETE - PURE ALPHA STRATEGY)
+################################################################################
 def main():
     st.title("Quantitative Portfolio Analysis")
     st.sidebar.header("Controls")
@@ -2095,10 +2097,7 @@ def main():
         "Portfolio Weighting Method",
         ["Equal Weight", "Inverse Volatility", "Log Log Sharpe Optimized"]
     )
-    risk_weight_ui = st.sidebar.slider(
-        "Risk Penalty Weight in Scoring", 0.0, 0.5, 0.2, 0.05,
-        help="How much to penalize stocks for high volatility and debt. 0 = Pure Alpha."
-    )
+    # --- REMOVED --- The risk penalty slider is no longer needed for a Pure Alpha strategy.
     corr_window = st.sidebar.slider("Correlation Window (days)", 30, 180, 90, 30)
     
     st.sidebar.subheader("🛡️ Portfolio Hedging")
@@ -2144,7 +2143,7 @@ def main():
         
     user_weights = auto_weights
     
-    # --- Risk-Managed Scoring Block ---
+    # --- SIMPLIFIED: Scoring Block (Pure Alpha - No Risk Penalty) ---
     alpha_score = pd.Series(0.0, index=results_df.index)
     for long_name, weight in user_weights.items():
         if weight > 0:
@@ -2155,17 +2154,9 @@ def main():
                     rank_series = 1 - rank_series
                 alpha_score += rank_series.fillna(0.5) * weight
 
-    # Apply risk penalty based on UI slider
-    final_raw_score = alpha_score
-    if risk_weight_ui > 0:
-        risk_factors = {'GARCH_Vol': 1.0, 'Debt_Ratio': 0.5}
-        risk_score = pd.Series(0.0, index=results_df.index)
-        for factor, weight in risk_factors.items():
-            risk_score += results_df[factor].rank(pct=True).fillna(0.5) * weight
-        final_raw_score = alpha_score * (1 - risk_weight_ui) - risk_score * risk_weight_ui
-
+    # The final score is now directly based on the pure alpha score
     def z_score(series): return (series - series.mean()) / (series.std() if series.std() > 0 else 1)
-    results_df['Score'] = z_score(final_raw_score)
+    results_df['Score'] = z_score(alpha_score)
     top_15_df = results_df.sort_values('Score', ascending=False).head(15).copy()
     top_15_tickers = top_15_df['Ticker'].tolist()
 
@@ -2174,7 +2165,7 @@ def main():
     if not top_15_tickers:
         st.warning("No stocks for portfolio construction."); st.stop()
     
-    # --- Core Portfolio Construction (uses winsorized data) ---
+    # --- Core Portfolio Construction ---
     st.subheader(f"Core Portfolio (Long Book): Weights by {weighting_method_ui}")
     portfolio_returns_df = pd.DataFrame(winsorized_returns_dict).reindex(columns=top_15_tickers).dropna(how='all')
     _, cov_matrix = calculate_correlation_matrix(top_15_tickers, winsorized_returns_dict, window=corr_window)
