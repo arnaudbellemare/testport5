@@ -635,7 +635,54 @@ def calculate_information_metrics(forecasted_alphas_ts, realized_returns_ts):
     except Exception as e:
         logging.error(f"Error in information metrics: {e}")
         return np.nan, np.nan
+def decompose_portfolio_risk(portfolio_returns_df, weights_df, factor_returns_df, factor_cov_matrix):
+    """
+    Decomposes the portfolio's total variance into systematic (factor) and specific (idiosyncratic) risk.
+    Based on the principles of the Fundamental Law of Active Management.
 
+    Args:
+        portfolio_returns_df (pd.DataFrame): DataFrame of the portfolio's constituent stock returns.
+        weights_df (pd.DataFrame): DataFrame with 'Ticker' and 'Weight' columns.
+        factor_returns_df (pd.DataFrame): DataFrame of returns for the risk factors.
+        factor_cov_matrix (pd.DataFrame): The covariance matrix of the factor returns.
+
+    Returns:
+        tuple: A tuple containing (total_variance, systematic_variance, specific_variance).
+    """
+    try:
+        # 1. Calculate the total variance of the portfolio directly from its return series
+        p_weights = weights_df.set_index('Ticker')['Weight']
+        aligned_returns = portfolio_returns_df.reindex(columns=p_weights.index).fillna(0.0)
+        portfolio_ts = (aligned_returns * p_weights).sum(axis=1)
+        total_variance = portfolio_ts.var() * 252  # Annualized
+
+        # 2. Calculate each stock's beta exposure to the factors
+        common_idx = aligned_returns.index.intersection(factor_returns_df.index)
+        aligned_stock_returns = aligned_returns.loc[common_idx]
+        aligned_factor_returns = factor_returns_df.loc[common_idx]
+        
+        betas_df = pd.DataFrame(index=aligned_stock_returns.columns, columns=factor_returns_df.columns)
+        for ticker in aligned_stock_returns.columns:
+            model = Ridge(alpha=0.1).fit(aligned_factor_returns, aligned_stock_returns[ticker])
+            betas_df.loc[ticker] = model.coef_
+        
+        # 3. Calculate Systematic (Factor) Variance: (w*B)' * F * (w*B)
+        # w*B gives the weighted beta exposure of the portfolio to each factor
+        portfolio_betas = (p_weights.values @ betas_df.values)
+        systematic_variance = portfolio_betas.T @ factor_cov_matrix @ portfolio_betas
+
+        # 4. Calculate Specific (Idiosyncratic) Variance
+        specific_variance = total_variance - systematic_variance
+        
+        if specific_variance < 0:
+            specific_variance = 0.0
+            systematic_variance = total_variance
+
+        return total_variance, systematic_variance, specific_variance
+
+    except Exception as e:
+        logging.error(f"Error in risk decomposition: {e}")
+        return np.nan, np.nan, np.nan
 # --- All Individual Metric Calculation Functions ---
 def calculate_garch_volatility(returns, window=252, dist='t'):
     if returns.empty or len(returns) < window or returns.isna().all(): return np.nan
