@@ -2175,7 +2175,7 @@ def display_stock_dashboard(ticker_symbol, results_df, returns_dict, etf_histori
 ################################################################################
 # SECTION 2: MAIN APPLICATION LOGIC (COMPLETE - UNCONSTRAINED PURE ALPHA STRATEGY)
 ################################################################################
-# SECTION 2: MAIN APPLICATION LOGIC (COMPLETE, WITH RISK DECOMPOSITION)
+# SECTION 2: MAIN APPLICATION LOGIC (COMPLETE, FINAL, AND FULLY-FEATURED)
 ################################################################################
 def main():
     st.title("Quantitative Portfolio Analysis")
@@ -2230,9 +2230,9 @@ def main():
             results_df, all_possible_metrics, REVERSE_METRIC_NAME_MAP
         )
 
-    with st.sidebar.expander("View Factor Stability Rationale", expanded=True):
-        if not rationale_df.empty:
-            rationale_df['Signal Direction'] = np.where(rationale_df['avg_sharpe_coeff'] >= 0, 'Positive ✅', 'Inverted 🔄')
+    if not rationale_df.empty:
+        rationale_df['Signal Direction'] = np.where(rationale_df['avg_sharpe_coeff'] >= 0, 'Positive ✅', 'Inverted 🔄')
+        with st.sidebar.expander("View Factor Stability Rationale", expanded=True):
             st.dataframe(rationale_df[['avg_sharpe_coeff', 'consistency_score', 'Signal Direction', 'Final_Weight']].loc[rationale_df['Final_Weight'] > 0.1].sort_values('Final_Weight', ascending=False))
         
     user_weights = auto_weights
@@ -2247,7 +2247,6 @@ def main():
                 if rationale_df.loc[short_name, 'avg_sharpe_coeff'] < 0:
                     rank_series = 1 - rank_series
                 alpha_score += rank_series.fillna(0.5) * weight
-
     def z_score(series): return (series - series.mean()) / (series.std() if series.std() > 0 else 1)
     results_df['Score'] = z_score(alpha_score)
     top_15_df = results_df.sort_values('Score', ascending=False).head(15).copy()
@@ -2311,12 +2310,13 @@ def main():
         col3.metric("Net Exposure", f"{net_exposure:.1%}")
     
     st.divider()
-    
+
     # --- Portfolio Performance Metrics ---
     st.subheader("📊 Portfolio Strategy Performance Metrics")
     spy_returns = etf_histories['SPY']['Close'].pct_change().dropna()
     common_idx = portfolio_returns_df.index.intersection(spy_returns.index)
     aligned_returns = portfolio_returns_df.loc[common_idx].copy().fillna(0.0)
+    ic, ir, malv = np.nan, np.nan, np.nan # Initialize metrics
     if not aligned_returns.empty and p_weights is not None and not p_weights.empty:
         valid_tickers_for_metrics = aligned_returns.columns
         aligned_w = p_weights.reindex(valid_tickers_for_metrics).fillna(0)
@@ -2334,37 +2334,40 @@ def main():
             col2.metric("Information Coefficient (IC)", f"{ic:.4f}", help="Lagged correlation of alpha vs returns.")
             col3.metric("Information Ratio (IR)", f"{ir:.4f}", help="Risk-adjusted return (Sharpe).")
 
-    # --- NEW: Portfolio Risk Decomposition Section ---
-    st.subheader("🔬 Portfolio Risk Decomposition")
-    with st.spinner("Decomposing portfolio risk..."):
-        factor_returns_df = pd.DataFrame({etf: etf_histories[etf]['Close'].pct_change() for etf in factor_etfs}).dropna()
-        factor_cov = factor_returns_df.cov() * 252
-        
-        total_var, sys_var, spec_var = decompose_portfolio_risk(portfolio_returns_df, weights_df, factor_returns_df, factor_cov)
-        
-        if pd.notna(total_var) and total_var > 0:
-            total_vol = np.sqrt(total_var)
-            sys_pct = (sys_var / total_var) * 100
-            spec_pct = (spec_var / total_var) * 100
+    # --- NEW: Advanced Risk Dashboard ---
+    st.subheader("🔬 Quantitative Risk Dashboard")
+    col1, col2 = st.columns([0.4, 0.6])
+    with col1:
+        st.subheader("Portfolio vs. Benchmark (SPY)")
+        with st.spinner("Decomposing portfolio risk..."):
+            factor_returns_df = pd.DataFrame({etf: etf_histories[etf]['Close'].pct_change() for etf in factor_etfs}).dropna()
+            factor_cov = factor_returns_df.cov() * 252
+            total_var, sys_var, spec_var = decompose_portfolio_risk(portfolio_returns_df, weights_df, factor_returns_df, factor_cov)
+            benchmark_metrics = get_benchmark_metrics()
 
-            col1, col2 = st.columns([0.6, 0.4])
-            with col1:
-                st.metric("Total Portfolio Volatility (Annualized)", f"{total_vol:.2%}")
-                risk_data = pd.DataFrame({'Risk Type': ['Systematic (Factor) Risk', 'Idiosyncratic (Stock-Specific) Risk'], 'Percentage': [sys_pct, spec_pct]})
-                fig = px.pie(risk_data, values='Percentage', names='Risk Type', title='Sources of Portfolio Risk', hole=.4, color_discrete_sequence=['#636EFA', '#00CC96'])
-                fig.update_traces(textinfo='percent+label', pull=[0.05, 0])
-                fig.update_layout(template='plotly_dark', showlegend=False, title_x=0.5)
-                st.plotly_chart(fig, use_container_width=True)
-            with col2:
-                st.write("#### Interpretation")
-                st.markdown(f"**Systematic Risk ({sys_pct:.1f}%)**: This portion of your portfolio's risk comes from its exposure to broad market factors (Value, Growth, Momentum, etc.). It cannot be diversified away without hedging.")
-                st.markdown(f"**Idiosyncratic Risk ({spec_pct:.1f}%)**: This portion comes from the unique, company-specific risks of your individual stock picks. This is the risk you are taking in pursuit of **'alpha'.**")
-                if spec_pct > 50:
-                    st.success("A high idiosyncratic risk percentage suggests the portfolio's fate is driven more by your unique stock selections than by broad market movements.")
-                else:
-                    st.warning("A high systematic risk percentage suggests the portfolio's performance is heavily influenced by broad market factor trends.")
-        else:
-            st.warning("Could not perform risk decomposition.")
+            if pd.notna(total_var) and total_var > 0:
+                spec_pct = (spec_var / total_var) * 100
+                st.metric("Idiosyncratic Risk %", f"{spec_pct:.1f}%", f"{spec_pct - 0:.1f}% vs SPY", help="The portion of risk unique to your stock picks. SPY is 0% by definition. Higher is better.")
+                
+                total_vol = np.sqrt(total_var)
+                bench_vol = benchmark_metrics['Volatility']
+                st.metric("Annualized Volatility", f"{total_vol:.2%}", f"{(total_vol - bench_vol)/bench_vol:.1%}" if pd.notna(bench_vol) else None, help="Total portfolio risk. Delta shows difference vs. SPY.")
+
+                if pd.notna(ir):
+                    bench_sharpe = benchmark_metrics['Sharpe Ratio']
+                    st.metric("Information Ratio", f"{ir:.2f}", f"{ir - bench_sharpe:.2f}" if pd.notna(bench_sharpe) else None, help="Risk-adjusted return. Delta shows difference vs. SPY Sharpe.")
+
+                avg_beta_val = top_15_df['Beta_to_SPY'].mean()
+                st.metric("Average Beta to SPY", f"{avg_beta_val:.2f}", f"{avg_beta_val - 1.0:.2f} vs SPY", help="Portfolio sensitivity to the S&P 500. SPY is 1.0 by definition.")
+    with col2:
+        st.subheader("Systematic Risk Exposure Breakdown")
+        portfolio_ts = (portfolio_returns_df * p_weights.set_index(portfolio_returns_df.columns)).sum(axis=1)
+        portfolio_betas = calculate_portfolio_factor_betas(portfolio_ts, factor_returns_df)
+        meaningful_factors = ['SPY', 'QQQ', 'IWM', 'MTUM', 'QUAL', 'IVE', 'IVW', 'USMV']
+        display_betas = portfolio_betas.reindex(meaningful_factors).dropna()
+        fig = plot_factor_exposure_breakdown(display_betas)
+        st.plotly_chart(fig, use_container_width=True)
+
 
     # --- Detailed Report Tabs ---
     st.header("📑 Detailed Reports")
