@@ -537,47 +537,6 @@ def calculate_fmp_weights(returns_df, new_factor_returns, cov_matrix, existing_f
         return pd.Series(np.ones(len(returns_df.columns)) / len(returns_df.columns), index=returns_df.columns)
 # Place this in SECTION 1 with other function definitions
 # (The other new function, plot_factor_correlations, is fine)
-
-def plot_sector_concentration(sector_counts):
-    """
-    Creates a colorful and interactive horizontal bar chart for sector concentration using Plotly.
-    """
-    df = sector_counts.reset_index()
-    df.columns = ['Sector', 'Count']
-    
-    colors = px.colors.qualitative.Plotly
-    num_colors = len(colors)
-    sector_color_map = {sector: colors[i % num_colors] for i, sector in enumerate(df['Sector'])}
-    
-    fig = go.Figure()
-    fig.add_trace(go.Bar(
-        y=df['Sector'],
-        x=df['Count'],
-        orientation='h',
-        marker_color=[sector_color_map[s] for s in df['Sector']],
-        text=df['Count'],
-        textposition='outside',
-        hoverinfo='y+x',
-        hovertemplate='<b>Sector:</b> %{y}<br><b>Count:</b> %{x}<extra></extra>'
-    ))
-
-    # --- THIS IS THE CORRECTED PART ---
-    fig.update_layout(
-        title_text='Sector Concentration in Long Book',
-        xaxis_title='Number of Stocks',
-        yaxis_title=None,
-        template='plotly_dark',
-        showlegend=False,
-        margin=dict(l=10, r=10, t=40, b=10),
-        xaxis=dict(showgrid=False),
-        # All yaxis properties are now in one dictionary
-        yaxis=dict(
-            autorange="reversed",
-            showgrid=False
-        )
-    )
-    return fig
-
 def plot_factor_correlations(factor_correlations):
     """
     Creates an interactive bar chart for factor correlations, coloring bars by sign (positive/negative).
@@ -585,11 +544,9 @@ def plot_factor_correlations(factor_correlations):
     df = factor_correlations.reset_index()
     df.columns = ['Factor', 'Correlation']
     
-    # Color bars green for positive correlation, red for negative
     colors = ['#00CC96' if val >= 0 else '#EF553B' for val in df['Correlation']]
     
     fig = go.Figure()
-
     fig.add_trace(go.Bar(
         y=df['Factor'],
         x=df['Correlation'],
@@ -605,12 +562,15 @@ def plot_factor_correlations(factor_correlations):
         title_text='Long Book Correlation to Factor ETFs',
         xaxis_title='Correlation Coefficient',
         yaxis_title=None,
-        yaxis=dict(autorange="reversed"),
         template='plotly_dark',
         showlegend=False,
         margin=dict(l=10, r=10, t=40, b=10),
         xaxis=dict(showgrid=False, zeroline=True, zerolinewidth=2, zerolinecolor='gray'),
-        yaxis=dict(showgrid=False)
+        # --- FIX: Combined yaxis properties into a single dictionary ---
+        yaxis=dict(
+            autorange="reversed",
+            showgrid=False
+        )
     )
     return fig
 def calculate_information_metrics(forecasted_alphas_ts, realized_returns_ts):
