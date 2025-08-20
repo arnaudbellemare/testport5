@@ -124,7 +124,8 @@ METRIC_NAME_MAP = {
     "Return_63d": "63-Day Return", "Return_126d": "126-Day Return", "Return_252d": "252-Day Return", "Audit_Risk": "Audit Risk",
     "Board_Risk": "Board Risk", "Compensation_Risk": "Compensation Risk", "Shareholder_Rights_Risk": "Shareholder Rights Risk",
     "Overall_Risk": "Overall Risk", "Institutional_Ownership_Ratio": "Institutional Ownership Ratio",
-    "Hurst_Exponent": "Hurst Exponent (Lo's R/S)", "Momentum": "Momentum", "Growth": "Growth","Earnings_Price_Ratio": "Earnings-Price Ratio (E/P)",
+    "Hurst_Exponent": "Hurst Exponent (Lo's R/S)", "Momentum": "Momentum", "Growth": "Growth", # <-- COMMA FIXED HERE
+    "Earnings_Price_Ratio": "Earnings-Price Ratio (E/P)",
     "Book_to_Market_Ratio": "Book-to-Market Ratio (B/M)",
     "Beta_Down_Market": "Down-Market Beta",
     "Beta_Up_Market": "Up-Market Beta"
