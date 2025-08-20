@@ -65,7 +65,7 @@ default_weights = {
     "Hurst Exponent (Lo's R/S)": 6.0
 }
 columns = [
-    "Ticker", "Name","Market_Cap", "Dividend_Yield", "PE_Ratio", "EPS_Diluted",
+    "Ticker", "Name","Market_Cap", "Dividend_Yield", "PE_Ratio", "EPS_Diluted","Beta_Up_Market","Beta_Down_Market"
     "Sales_Per_Share", "FCF_Per_Share", "Asset_Turnover", "CapEx_to_DepAmor",
     "Current_Ratio", "Debt_Ratio", "Dividends_to_FCF", "Gross_Profit_Margin",
     "Interest_Coverage", "Inventory_Turnover", "Net_Profit_Margin", "Quick_Ratio",
@@ -146,7 +146,28 @@ def get_value(df, possible_keys, col_index=0):
                  val = series
                  return pd.to_numeric(val, errors='coerce') if val is not None else np.nan
     return np.nan
+def calculate_regime_aware_betas(stock_returns, market_returns, lookback=252):
+    # Align and slice data
+    df = pd.concat([stock_returns, market_returns], axis=1).dropna().tail(lookback)
+    df.columns = ['stock', 'market']
 
+    # Define regimes
+    down_market_days = df[df['market'] < 0]
+    up_market_days = df[df['market'] >= 0]
+
+    if len(down_market_days) < 30 or len(up_market_days) < 30:
+        # Not enough data for a stable estimate, fall back to simple beta
+        return linregress(df['market'], df['stock']).slope
+
+    # Calculate beta for each regime
+    down_beta_model = linregress(down_market_days['market'], down_market_days['stock'])
+    up_beta_model = linregress(up_market_days['market'], up_market_days['stock'])
+    
+    down_beta = down_beta_model.slope
+    up_beta = up_beta_model.slope
+    
+    # For hedging, the down-market beta is the most critical number
+    return {'down_beta': down_beta, 'up_beta': up_beta, 'conservative_beta': max(down_beta, up_beta)}
 # Helper function required by the main function
 def nearest_psd_matrix(matrix):
     """
@@ -177,77 +198,70 @@ def nearest_psd_matrix(matrix):
 def calculate_robust_hedge_weights(
     core_portfolio_returns, 
     hedge_instrument_returns, 
-    lambda_uncertainty=0.5
+    lambda_uncertainty=0.5,
+    market_factor_for_regime='SPY' ### CHANGE: Added parameter to define the market regime
 ):
     """
     Calculates optimal hedge weights using a tracking error minimization framework
-    that accounts for beta estimation uncertainty (regularization).
-
-    Args:
-        core_portfolio_returns (pd.DataFrame): DataFrame of returns for the assets to be hedged.
-        hedge_instrument_returns (pd.DataFrame): DataFrame of returns for the hedging instruments.
-        lambda_uncertainty (float): A scalar to control the strength of the regularization.
-                                    Higher values mean more uncertainty and a more conservative hedge.
-
-    Returns:
-        pd.Series: A Series of optimal weights for the hedging instruments.
+    that accounts for beta estimation uncertainty (regularization) and is calibrated
+    to DOWN-MARKET regimes for maximum robustness.
     """
     # 1. Align data and drop NaNs
     common_index = core_portfolio_returns.index.intersection(hedge_instrument_returns.index)
-    if len(common_index) < 60: # Need sufficient data for stable estimates
+    if len(common_index) < 60:
         logging.warning("Insufficient data for robust hedging. Returning zero weights.")
         return pd.Series(0.0, index=hedge_instrument_returns.columns)
         
     y = core_portfolio_returns.loc[common_index]
     X = hedge_instrument_returns.loc[common_index]
-    
-    # 2. Estimate Betas (B matrix) and Beta Uncertainty (Ω_β matrix)
+
+    ### CHANGE: Define regimes based on the market factor
+    if market_factor_for_regime not in X.columns:
+        logging.error(f"Market factor {market_factor_for_regime} not in hedge instruments. Falling back.")
+        down_market_index = X.index # Fallback to using all data
+    else:
+        market_returns = X[market_factor_for_regime]
+        down_market_index = market_returns[market_returns < 0].index
+        if len(down_market_index) < 30: # Ensure enough data for stable estimates
+            logging.warning("Insufficient down-market days for regime hedge. Using full sample.")
+            down_market_index = X.index
+
+    # Slice the data to only include down-market days for beta calculation
+    y_down = y.loc[down_market_index]
+    X_down = X.loc[down_market_index]
+
+    # 2. Estimate Betas (B matrix) and Uncertainty using ONLY the down-market data
     betas = []
     beta_variances = []
 
     for stock in y.columns:
-        # For each stock, regress its returns against ALL hedge instruments
-        model = Ridge(alpha=0.1, fit_intercept=True).fit(X, y[stock])
+        # For each stock, regress its returns against ALL hedge instruments using down-market data
+        model = Ridge(alpha=0.1, fit_intercept=True).fit(X_down, y_down[stock])
         betas.append(model.coef_)
         
-        # Estimate uncertainty: Use the variance of the residuals from the regression
-        # This is a practical proxy for the standard error of the beta estimates
-        residuals = y[stock] - model.predict(X)
+        # Estimate uncertainty from the residuals of this down-market regression
+        residuals = y_down[stock] - model.predict(X_down)
         beta_variances.append(np.var(residuals))
 
-    # B is a matrix where each row corresponds to a stock and each column to a hedge factor
     B = np.array(betas)
-    # Omega_beta is a diagonal matrix of our uncertainty proxies
     Omega_beta = np.diag(beta_variances)
 
-    # 3. Construct the Components for the Optimal Hedge Formula
-    # Covariance matrix of the hedging instruments
+    # 3. Construct Components for the Optimal Hedge Formula
+    # IMPORTANT: The covariance matrices should still be calculated on the FULL dataset
+    # to capture the overall risk structure, not just the down-market structure.
     Sigma_hedge = X.cov().values
     
-    # The regularization term from the textbook: B' * Ω_β * B
     regularizer = B.T @ Omega_beta @ B
-    
-    # The robust, regularized covariance matrix
-    # We scale the regularizer by lambda to control its influence
     robust_Sigma = Sigma_hedge + (lambda_uncertainty * regularizer)
     
-    # *** FIX: Calculate cross-covariance correctly ***
-    # Combine the dataframes to calculate the full covariance matrix
     combined_df = pd.concat([y, X], axis=1)
     full_cov_matrix = combined_df.cov()
-    # Select the block representing the covariance between core assets (y) and hedge instruments (X)
     Sigma_core_hedge = full_cov_matrix.loc[y.columns, X.columns].values
-    
-    # Sum of the covariances for the aggregate portfolio
-    # This is equivalent to assuming an equal-weighted portfolio of the core assets
-    # For a weighted portfolio, you would do: Sigma_core_hedge.T @ core_weights
     sum_covariances = np.sum(Sigma_core_hedge, axis=0)
     
     # 4. Solve for Optimal Hedge Weights
-    # The solution is w_hedge = (Robust_Sigma)^-1 * (sum_covariances)
     try:
         inv_robust_Sigma = np.linalg.inv(nearest_psd_matrix(robust_Sigma))
-        # The optimal position is the negative of this result
         optimal_hedge_weights = -1 * inv_robust_Sigma @ sum_covariances
         
         return pd.Series(optimal_hedge_weights, index=X.columns)
@@ -255,7 +269,6 @@ def calculate_robust_hedge_weights(
     except np.linalg.LinAlgError:
         logging.error("Robust hedging failed due to singular matrix. Returning zero weights.")
         return pd.Series(0.0, index=X.columns)
-
 # --- Deep Dive Data Functions (for UI) ---
 @st.cache_data
 def fetch_and_organize_deep_dive_data(_ticker_symbol):
@@ -1100,10 +1113,16 @@ def process_single_ticker(ticker_symbol, etf_histories, sector_etf_map):
                 spy_hist = etf_histories.get('SPY')
                 if spy_hist is not None and not spy_hist.empty:
                     spy_returns = np.log(spy_hist['Close'] / spy_hist['Close'].shift(1)).dropna()
-                    common_idx = log_returns.index.intersection(spy_returns.index)
-                    if len(common_idx) > 30:
-                        slope, _, _, _, _ = linregress(spy_returns[common_idx], log_returns[common_idx])
-                        data['Beta_to_SPY'] = slope
+    # Call your new regime-aware function
+                    beta_data = calculate_regime_aware_betas(log_returns, spy_returns)
+    
+    # Store the more detailed beta information
+                    if isinstance(beta_data, dict):
+                        data['Beta_to_SPY'] = beta_data.get('conservative_beta') # Use conservative beta for general display
+                        data['Beta_Down_Market'] = beta_data.get('down_beta')
+                        data['Beta_Up_Market'] = beta_data.get('up_beta')
+                    else: # Fallback if function returned a single value
+                        data['Beta_to_SPY'] = beta_data
                 
                 rolling_correlations = {}
                 for etf, etf_history in etf_histories.items():
@@ -2337,7 +2356,7 @@ def main():
             hedge_instrument_returns_dict = {etf: etf_histories[etf]['Close'].pct_change().dropna() for etf in hedge_risks if etf in etf_histories and not etf_histories[etf].empty}
             if hedge_instrument_returns_dict:
                 hedge_instrument_returns_df = pd.DataFrame(hedge_instrument_returns_dict)
-                hedge_weights = calculate_robust_hedge_weights(portfolio_returns_df, hedge_instrument_returns_df, lambda_uncertainty=lambda_uncertainty_ui)
+                hedge_weights = calculate_robust_hedge_weights(portfolio_returns_df,hedge_instrument_returns_df,lambda_uncertainty=lambda_uncertainty_ui)
     if not hedge_weights.empty:
         st.subheader("Hedge Portfolio & Final Exposure")
         long_exposure = 1.0; current_short_exposure = hedge_weights.sum()
