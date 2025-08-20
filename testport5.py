@@ -2129,7 +2129,8 @@ def display_stock_dashboard(ticker_symbol, results_df, returns_dict, etf_histori
 ################################################################################
 # SECTION 2: MAIN APPLICATION LOGIC (COMPLETE AND FINAL)
 ################################################################################
-# SECTION 2: MAIN APPLICATION LOGIC (COMPLETE, WITH RISK DECOMPOSITION)
+################################################################################
+# SECTION 2: MAIN APPLICATION LOGIC (COMPLETE, WITH ALL METRICS RESTORED)
 ################################################################################
 def main():
     st.title("Quantitative Portfolio Analysis")
@@ -2199,7 +2200,6 @@ def main():
                 if rationale_df.loc[short_name, 'avg_sharpe_coeff'] < 0:
                     rank_series = 1 - rank_series
                 alpha_score += rank_series.fillna(0.5) * weight
-
     def z_score(series): return (series - series.mean()) / (series.std() if series.std() > 0 else 1)
     results_df['Score'] = z_score(alpha_score)
     top_15_df = results_df.sort_values('Score', ascending=False).head(15).copy()
@@ -2263,6 +2263,28 @@ def main():
         col3.metric("Net Exposure", f"{net_exposure:.1%}")
     
     st.divider()
+    
+    # --- RESTORED: Portfolio Performance Metrics ---
+    st.subheader("📊 Portfolio Strategy Performance Metrics")
+    spy_returns = etf_histories['SPY']['Close'].pct_change().dropna()
+    common_idx = portfolio_returns_df.index.intersection(spy_returns.index)
+    aligned_returns = portfolio_returns_df.loc[common_idx].copy().fillna(0.0)
+    if not aligned_returns.empty and p_weights is not None and not p_weights.empty:
+        valid_tickers_for_metrics = aligned_returns.columns
+        aligned_w = p_weights.reindex(valid_tickers_for_metrics).fillna(0)
+        final_returns = (aligned_returns * aligned_w).sum(axis=1)
+        aligned_scores = top_15_df[top_15_df['Ticker'].isin(valid_tickers_for_metrics)].set_index('Ticker')['Score']
+        if not aligned_scores.empty and aligned_scores.sum() != 0:
+            alpha_weights = aligned_scores / aligned_scores.sum()
+            forecast_ts_unlagged = (aligned_returns * alpha_weights).sum(axis=1)
+            lagged_forecast_ts = forecast_ts_unlagged.shift(1)
+            aligned_cov_matrix = cov_matrix.loc[valid_tickers_for_metrics, valid_tickers_for_metrics]
+            malv, _ = calculate_mahalanobis_metrics(aligned_returns, aligned_cov_matrix)
+            ic, ir = calculate_information_metrics(lagged_forecast_ts, final_returns)
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Precision Matrix Quality (MALV)", f"{malv:.4f}", help=f"Expected: {2/len(valid_tickers_for_metrics):.4f}")
+            col2.metric("Information Coefficient (IC)", f"{ic:.4f}", help="Lagged correlation of alpha vs returns.")
+            col3.metric("Information Ratio (IR)", f"{ir:.4f}", help="Risk-adjusted return (Sharpe).")
 
     # --- NEW: Portfolio Risk Decomposition Section ---
     st.subheader("🔬 Portfolio Risk Decomposition")
