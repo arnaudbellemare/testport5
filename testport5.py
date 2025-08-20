@@ -322,7 +322,36 @@ def fetch_and_organize_deep_dive_data(_ticker_symbol):
             "Cash Flow": statement_to_df(cashflow),
         }
     except Exception as e: return {"Error": f"An error occurred: {e}"}
-def winsorize_returns(returns_dict, lookback_T=126, d_max=7.0):
+# Place this in SECTION 1 with other function definitions
+
+def calculate_portfolio_factor_betas(portfolio_ts, factor_returns_df):
+    """
+    Calculates the portfolio's beta exposure to a set of factors using regression.
+    """
+    common_idx = portfolio_ts.index.intersection(factor_returns_df.index)
+    aligned_portfolio_ts = portfolio_ts.loc[common_idx]
+    aligned_factor_returns = factor_returns_df.loc[common_idx]
+    
+    model = Ridge(alpha=0.1).fit(aligned_factor_returns, aligned_portfolio_ts)
+    
+    return pd.Series(model.coef_, index=factor_returns_df.columns, name="Factor Betas")
+
+def get_benchmark_metrics(benchmark_ticker="SPY", period="3y"):
+    """
+    Calculates key risk/return metrics for a benchmark ETF.
+    """
+    try:
+        hist = yf.Ticker(benchmark_ticker).history(period=period)
+        returns = hist['Close'].pct_change().dropna()
+        
+        volatility = returns.std() * np.sqrt(252)
+        sharpe_ratio = (returns.mean() * 252) / volatility if volatility > 0 else 0
+        
+        return {'Volatility': volatility, 'Sharpe Ratio': sharpe_ratio}
+    except Exception as e:
+        logging.error(f"Could not get benchmark metrics for {benchmark_ticker}: {e}")
+        return {'Volatility': np.nan, 'Sharpe Ratio': np.nan}        
+def winsorize_returns(returns_dict, lookback_T=126, d_max=6.0):
     """
     Winsorizes returns based on the robust z-score method described in
     "The Elements of Quantitative Investing".
