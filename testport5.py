@@ -2001,59 +2001,48 @@ def display_valuation_wizard(ticker_symbol):
                 res_col3.info(commentary)
         else:
             st.error(f"Valuation Failed. Reason: {commentary}")
-
-def get_correlated_stocks(selected_ticker, returns_dict, results_df, top_n=25):
+def get_correlated_stocks(selected_ticker, returns_dict, results_df, correlation_threshold=0.6):
     """
-    Finds other tickers most correlated with the selected ticker.
+    Finds other tickers that are significantly correlated with the selected ticker,
+    enriches the data with key metrics, and calculates a pairs trade score.
     """
     if selected_ticker not in returns_dict or len(returns_dict) < 2:
-        logging.warning(f"Correlation check failed: {selected_ticker} not in returns_dict or not enough tickers.")
         return pd.DataFrame()
 
     try:
         all_returns_df = pd.concat(returns_dict, axis=1)
     except Exception as e:
-        logging.error(f"Failed to concat returns_dict: {e}")
-        return pd.DataFrame()
+        logging.error(f"Failed to concat returns_dict: {e}"); return pd.DataFrame()
 
-    recent_returns = all_returns_df.tail(90)
-    recent_returns_filled = recent_returns.fillna(0.0)
+    recent_returns = all_returns_df.tail(90).fillna(0.0)
+    if selected_ticker not in recent_returns.columns: return pd.DataFrame()
 
-    variances = recent_returns_filled.var()
-    valid_columns = variances[variances > 1e-9].index
-    recent_returns_final = recent_returns_filled[valid_columns]
+    correlations_to_selected = recent_returns.corr()[selected_ticker].drop(selected_ticker, errors='ignore')
+    significantly_correlated = correlations_to_selected[correlations_to_selected.abs() >= correlation_threshold]
 
-    if selected_ticker not in recent_returns_final.columns:
-        logging.warning(f"{selected_ticker} has no valid return data in the last 90 days.")
-        return pd.DataFrame()
-
-    corr_matrix = recent_returns_final.corr()
-    
-    if selected_ticker not in corr_matrix:
-        return pd.DataFrame()
-
-    correlations_to_selected = corr_matrix[selected_ticker].drop(selected_ticker, errors='ignore')
-
-    if correlations_to_selected.empty:
-        logging.warning(f"No other valid stocks to correlate with {selected_ticker}.")
-        return pd.DataFrame()
+    if significantly_correlated.empty: return pd.DataFrame()
         
-    corr_df = pd.DataFrame(correlations_to_selected).rename(columns={selected_ticker: 'Correlation'})
+    corr_df = pd.DataFrame(significantly_correlated).rename(columns={selected_ticker: 'Correlation'})
 
-    required_cols = ['Ticker', 'Best_Factor', 'Relative_Z_Score']
+    # --- NEW: Add more insightful columns to fetch ---
+    required_cols = ['Ticker', 'Relative_Z_Score', 'Piotroski_F-Score', 'PE_Ratio', 'Return_63d']
     if all(col in results_df.columns for col in required_cols):
         additional_info = results_df[required_cols].set_index('Ticker')
         corr_df = corr_df.join(additional_info)
-        corr_df = corr_df.rename(columns={'Best_Factor': 'Benchmark'})
-        # FIX: Replaced inplace=True with direct assignment
-        corr_df['Benchmark'] = corr_df['Benchmark'].fillna("N/A")
     else:
-        corr_df['Relative_Z_Score'] = np.nan
-        corr_df['Benchmark'] = "N/A"
+        # Fallback if columns are missing
+        for col in required_cols:
+            if col != 'Ticker': corr_df[col] = np.nan
 
-    corr_df = corr_df.reindex(corr_df['Relative_Z_Score'].abs().fillna(0).sort_values(ascending=False).index)
+    # --- NEW: Calculate the Pairs Trade Score ---
+    selected_stock_z_score = results_df.set_index('Ticker').loc[selected_ticker, 'Relative_Z_Score']
+    corr_df['Z_Score_Divergence'] = (corr_df['Relative_Z_Score'] - selected_stock_z_score).abs()
+    corr_df['Pairs_Score'] = corr_df['Correlation'].abs() * corr_df['Z_Score_Divergence']
 
-    return corr_df.head(top_n)
+    # Sort by the new Pairs Score for maximum insight
+    corr_df_sorted = corr_df.sort_values('Pairs_Score', ascending=False)
+
+    return corr_df_sorted
 
 def display_stock_dashboard(ticker_symbol, results_df, returns_dict, etf_histories):
     """Orchestrator function to display the entire individual stock dashboard."""
@@ -2104,21 +2093,47 @@ def display_stock_dashboard(ticker_symbol, results_df, returns_dict, etf_histori
         display_momentum_bar(ticker_symbol, daily_history)
 
     with col2:
-        st.subheader(f"Most Correlated Stocks (90d)")
+        st.subheader(f"Actionable Peer Analysis (90d)") # Renamed for clarity
         
         correlated_stocks_df = get_correlated_stocks(ticker_symbol, returns_dict, results_df)
 
         if not correlated_stocks_df.empty:
+            # --- NEW: Define the columns to display ---
+            display_cols = [
+                'Pairs_Score', 
+                'Correlation', 
+                'Relative_Z_Score', 
+                'Piotroski_F-Score', 
+                'PE_Ratio', 
+                'Return_63d'
+            ]
+            
             st.dataframe(
-                correlated_stocks_df[['Correlation', 'Relative_Z_Score', 'Benchmark']],
-                use_container_width=True
+                correlated_stocks_df[display_cols],
+                use_container_width=True,
+                # --- NEW: Use column_config for a professional look ---
+                column_config={
+                    "Pairs_Score": st.column_config.ProgressColumn(
+                        "Pairs Score",
+                        help="Highlights potential pairs trades. Higher score = High Correlation + High Z-Score Divergence.",
+                        format="%.2f",
+                        min_value=0,
+                        max_value=max(correlated_stocks_df['Pairs_Score'].max(), 3), # Dynamic max
+                    ),
+                    "Correlation": st.column_config.NumberColumn(format="%.2f"),
+                    "Relative_Z_Score": st.column_config.NumberColumn("Z-Score", format="%.2f"),
+                    "Piotroski_F-Score": st.column_config.ProgressColumn(
+                        "F-Score",
+                        help="Fundamental health score (0-9). Higher is better.",
+                        min_value=0,
+                        max_value=9,
+                    ),
+                    "PE_Ratio": st.column_config.NumberColumn("P/E Ratio", format="%.1f"),
+                    "Return_63d": st.column_config.NumberColumn("3-Mo Return", format="%.1f%%"),
+                }
             )
         else:
-            st.write("No correlated stocks found.")
-        
-        if 'display_valuation_wizard' in globals():
-            st.divider()
-            display_valuation_wizard(ticker_symbol)
+            st.info(f"No stocks found with a 90-day correlation to {ticker_symbol} of 0.6 or higher.")
 
 ################################################################################
 # SECTION 2: MAIN APPLICATION LOGIC (CORRECTED)
