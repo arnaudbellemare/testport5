@@ -2080,7 +2080,7 @@ def display_stock_dashboard(ticker_symbol, results_df, returns_dict, etf_histori
 ################################################################################
 # SECTION 2: MAIN APPLICATION LOGIC (WITH INTERACTIVE PLOTS)
 ################################################################################
-# SECTION 2: MAIN APPLICATION LOGIC (COMPLETE, FINAL, AND FULLY-FEATURED)
+# SECTION 2: MAIN APPLICATION LOGIC (COMPLETE AND FINAL)
 ################################################################################
 def main():
     st.title("Quantitative Portfolio Analysis")
@@ -2095,11 +2095,10 @@ def main():
         "Portfolio Weighting Method",
         ["Equal Weight", "Inverse Volatility", "Log Log Sharpe Optimized"]
     )
-    # To re-enable the risk penalty, uncomment the slider below and the logic in the scoring block
-    # risk_weight_ui = st.sidebar.slider(
-    #     "Risk Penalty Weight in Scoring", 0.0, 0.5, 0.0, 0.05,
-    #     help="How much to penalize stocks for high volatility and debt. 0 = Pure Alpha."
-    # )
+    risk_weight_ui = st.sidebar.slider(
+        "Risk Penalty Weight in Scoring", 0.0, 0.5, 0.2, 0.05,
+        help="How much to penalize stocks for high volatility and debt. 0 = Pure Alpha."
+    )
     corr_window = st.sidebar.slider("Correlation Window (days)", 30, 180, 90, 30)
     
     st.sidebar.subheader("🛡️ Portfolio Hedging")
@@ -2145,7 +2144,7 @@ def main():
         
     user_weights = auto_weights
     
-    # --- Scoring Block (Pure Alpha Version) ---
+    # --- Risk-Managed Scoring Block ---
     alpha_score = pd.Series(0.0, index=results_df.index)
     for long_name, weight in user_weights.items():
         if weight > 0:
@@ -2156,8 +2155,17 @@ def main():
                     rank_series = 1 - rank_series
                 alpha_score += rank_series.fillna(0.5) * weight
 
+    # Apply risk penalty based on UI slider
+    final_raw_score = alpha_score
+    if risk_weight_ui > 0:
+        risk_factors = {'GARCH_Vol': 1.0, 'Debt_Ratio': 0.5}
+        risk_score = pd.Series(0.0, index=results_df.index)
+        for factor, weight in risk_factors.items():
+            risk_score += results_df[factor].rank(pct=True).fillna(0.5) * weight
+        final_raw_score = alpha_score * (1 - risk_weight_ui) - risk_score * risk_weight_ui
+
     def z_score(series): return (series - series.mean()) / (series.std() if series.std() > 0 else 1)
-    results_df['Score'] = z_score(alpha_score) # Using the pure alpha score
+    results_df['Score'] = z_score(final_raw_score)
     top_15_df = results_df.sort_values('Score', ascending=False).head(15).copy()
     top_15_tickers = top_15_df['Ticker'].tolist()
 
@@ -2166,7 +2174,7 @@ def main():
     if not top_15_tickers:
         st.warning("No stocks for portfolio construction."); st.stop()
     
-    # --- Core Portfolio Construction ---
+    # --- Core Portfolio Construction (uses winsorized data) ---
     st.subheader(f"Core Portfolio (Long Book): Weights by {weighting_method_ui}")
     portfolio_returns_df = pd.DataFrame(winsorized_returns_dict).reindex(columns=top_15_tickers).dropna(how='all')
     _, cov_matrix = calculate_correlation_matrix(top_15_tickers, winsorized_returns_dict, window=corr_window)
@@ -2182,6 +2190,7 @@ def main():
             st.subheader("Average Beta Exposure")
             avg_beta_val = top_15_df['Beta_to_SPY'].mean()
             st.metric("Average Beta of Long Book", f"{avg_beta_val:.2f}")
+
             sector_counts = top_15_df['Sector'].value_counts()
             sector_fig = plot_sector_concentration(sector_counts)
             st.plotly_chart(sector_fig, use_container_width=True)
@@ -2191,6 +2200,8 @@ def main():
             if not factor_correlations.empty:
                 factor_fig = plot_factor_correlations(factor_correlations.head(10))
                 st.plotly_chart(factor_fig, use_container_width=True)
+            else:
+                st.warning("Could not calculate factor correlations.")
 
     # --- Hedging Calculation and Display with Scaling ---
     hedge_weights = pd.Series(dtype=float)
