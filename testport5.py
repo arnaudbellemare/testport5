@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 import time
 import logging
+import pandas_datareader.data as web
 from scipy.stats import linregress, chi2
 from scipy.linalg import solve_toeplitz
 import cvxpy as cp
@@ -66,7 +67,8 @@ default_weights = {
 }
 columns = [
     "Ticker", "Name","Market_Cap", "Dividend_Yield", "PE_Ratio", "EPS_Diluted","Beta_Up_Market","Beta_Down_Market"
-    "Sales_Per_Share", "FCF_Per_Share", "Asset_Turnover", "CapEx_to_DepAmor",
+    "Sales_Per_Share", "FCF_Per_Share", "Asset_Turnover", "CapEx_to_DepAmor","Earnings_Price_Ratio", "Book_to_Market_Ratio",
+    "Beta_Down_Market", "Beta_Up_Market",
     "Current_Ratio", "Debt_Ratio", "Dividends_to_FCF", "Gross_Profit_Margin",
     "Interest_Coverage", "Inventory_Turnover", "Net_Profit_Margin", "Quick_Ratio",
     "ROA", "ROE", "Share_Buyback_to_FCF", "Dividends_Plus_Buyback_to_FCF",
@@ -118,7 +120,10 @@ METRIC_NAME_MAP = {
     "Return_63d": "63-Day Return", "Return_126d": "126-Day Return", "Return_252d": "252-Day Return", "Audit_Risk": "Audit Risk",
     "Board_Risk": "Board Risk", "Compensation_Risk": "Compensation Risk", "Shareholder_Rights_Risk": "Shareholder Rights Risk",
     "Overall_Risk": "Overall Risk", "Institutional_Ownership_Ratio": "Institutional Ownership Ratio",
-    "Hurst_Exponent": "Hurst Exponent (Lo's R/S)", "Momentum": "Momentum", "Growth": "Growth"
+    "Hurst_Exponent": "Hurst Exponent (Lo's R/S)", "Momentum": "Momentum", "Growth": "Growth","Earnings_Price_Ratio": "Earnings-Price Ratio (E/P)",
+    "Book_to_Market_Ratio": "Book-to-Market Ratio (B/M)",
+    "Beta_Down_Market": "Down-Market Beta",
+    "Beta_Up_Market": "Up-Market Beta"
 }
 REVERSE_METRIC_NAME_MAP = {v: k for k, v in METRIC_NAME_MAP.items()}
 
@@ -888,6 +893,54 @@ def calculate_volatility_adjusted_z_score(prices, period=252, ticker="Unknown", 
 
     return robust_z
 
+def fetch_macro_data(start_date, end_date):
+    # Fetch 10-Year Treasury Yield (Interest Rates)
+    ten_year_yield = web.DataReader('DGS10', 'fred', start_date, end_date)
+    # Fetch Financial Stress Index (e.g., St. Louis Fed's)
+    stress_index = web.DataReader('STLFSI3', 'fred', start_date, end_date)
+    # Fetch CPI (Inflation)
+    inflation = web.DataReader('CPIAUCSL', 'fred', start_date, end_date).pct_change(12) * 100
+    
+    macro_df = pd.concat([ten_year_yield, stress_index, inflation], axis=1).ffill()
+    macro_df.columns = ['Interest_Rate', 'Stress_Index', 'Inflation']
+    return macro_df
+def _run_analysis_on_subset(_data_subset, _all_possible_metrics, _reverse_metric_map):
+    """
+    Helper function to run the core factor stability analysis on a given subset of data.
+    This encapsulates the logic of the original run_factor_stability_analysis function.
+    """
+    if _data_subset.empty or len(_data_subset.index.unique()) < 252: # Need at least a year of data
+        logging.warning("Data subset is too small for meaningful stability analysis. Returning empty results.")
+        return {metric: 0.0 for metric in _all_possible_metrics}, pd.DataFrame()
+
+    time_horizons = {
+        "1M": "Return_21d", "3M": "Return_63d",
+        "6M": "Return_126d", "12M": "Return_252d",
+    }
+    valid_metric_cols = [c for c in _data_subset.columns if pd.api.types.is_numeric_dtype(_data_subset[c]) and 'Return' not in c and c not in ['Ticker', 'Name', 'Score']]
+    stability_results = {}
+
+    # Group data by date for cross-sectional analysis
+    grouped_data = _data_subset.groupby(_data_subset.index)
+
+    for horizon_label, target_column in time_horizons.items():
+        if target_column in _data_subset.columns:
+            historical_pure_returns = []
+            # Iterate through time to perform point-in-time cross-sectional regressions
+            for date, group in grouped_data:
+                pure_returns_today = calculate_pure_returns(group, valid_metric_cols, target=target_column)
+                if not pure_returns_today.empty:
+                    historical_pure_returns.append(pure_returns_today)
+            
+            if historical_pure_returns:
+                stability_df = analyze_coefficient_stability(historical_pure_returns)
+                stability_results[horizon_label] = stability_df
+
+    auto_weights, rationale_df = aggregate_stability_and_set_weights(
+        stability_results, _all_possible_metrics, _reverse_metric_map
+    )
+    
+    return auto_weights, rationale_df    
 def recalculate_relative_z_scores(top_15_df, etf_histories, period="3y", window=252, min_window=200):
     """
     Recalculates relative Z-scores for a list of stocks against their benchmark ETFs.
@@ -1062,6 +1115,18 @@ def process_single_ticker(ticker_symbol, etf_histories, sector_etf_map):
         buybacks = get_value(cashflow, ['Repurchase Of Capital Stock', 'RepurchaseOfStock']) or 0
         fcf = (operating_cash_flow if pd.notna(operating_cash_flow) else 0) + (capex if pd.notna(capex) else 0)
 
+        ### --- NEW: Academic Factor Calculations --- ###
+        pe_ratio = info.get('trailingPE')
+        pb_ratio = info.get('priceToBook')
+
+        data['PE_Ratio'] = pe_ratio # We still store the original P/E
+        if pe_ratio is not None and pe_ratio > 0:
+            data['Earnings_Price_Ratio'] = (1 / pe_ratio) * 100
+        
+        if pb_ratio is not None and pb_ratio > 0:
+            data['Book_to_Market_Ratio'] = 1 / pb_ratio
+        ### ----------------------------------------- ###
+
         data['Current_Ratio'] = current_assets / current_liabilities if current_liabilities and current_liabilities > 0 else np.nan
         data['Quick_Ratio'] = (current_assets - inventory) / current_liabilities if current_liabilities and current_liabilities > 0 else np.nan
         data['Debt_Ratio'] = total_liabilities / total_assets if total_assets and total_assets > 0 else np.nan
@@ -1110,19 +1175,22 @@ def process_single_ticker(ticker_symbol, etf_histories, sector_etf_map):
                 data['Dollar_Volume_90D'] = (history['Volume'] * history['Close']).rolling(90).mean().iloc[-1]
                 data['Momentum'] = (history['Close'].iloc[-1] / history['Close'].iloc[-252] - 1) * 100 if len(history) > 252 else np.nan
                 
+                ### --- UPGRADED: Regime-Aware Beta Calculation --- ###
                 spy_hist = etf_histories.get('SPY')
                 if spy_hist is not None and not spy_hist.empty:
                     spy_returns = np.log(spy_hist['Close'] / spy_hist['Close'].shift(1)).dropna()
-    # Call your new regime-aware function
+    
+                    # Call your new regime-aware function
                     beta_data = calculate_regime_aware_betas(log_returns, spy_returns)
     
-    # Store the more detailed beta information
+                    # Store the more detailed beta information
                     if isinstance(beta_data, dict):
                         data['Beta_to_SPY'] = beta_data.get('conservative_beta') # Use conservative beta for general display
                         data['Beta_Down_Market'] = beta_data.get('down_beta')
                         data['Beta_Up_Market'] = beta_data.get('up_beta')
                     else: # Fallback if function returned a single value
                         data['Beta_to_SPY'] = beta_data
+                ### -------------------------------------------- ###
                 
                 rolling_correlations = {}
                 for etf, etf_history in etf_histories.items():
@@ -1176,7 +1244,6 @@ def process_single_ticker(ticker_symbol, etf_histories, sector_etf_map):
         failed_data['Ticker'] = ticker_symbol
         failed_data['Name'] = f"{ticker_symbol} (Processing Error)"
         return [failed_data.get(col) for col in columns], pd.Series()
-
 @st.cache_data
 def process_tickers(_tickers, _etf_histories, _sector_etf_map):
     results, returns_dict, failed_tickers = [], {}, []
@@ -1249,6 +1316,62 @@ def run_factor_stability_analysis(_results_df, _all_possible_metrics, _reverse_m
     )
     
     return auto_weights, rationale_df, stability_results
+@st.cache_data
+def run_regime_aware_factor_analysis(full_historical_data, macro_data, _all_possible_metrics, _reverse_metric_map):
+    """
+    Orchestrates the factor stability analysis across different macroeconomic regimes.
+    It returns a dictionary of weights and rationales, one for each defined regime.
+    """
+    if full_historical_data.empty or macro_data.empty:
+        return {}
+
+    # --- 1. Define Macroeconomic Regimes ---
+    # Interest Rate Regime
+    rate_moving_avg = macro_data['Interest_Rate'].rolling(window=252, min_periods=60).mean()
+    high_rate_mask = macro_data['Interest_Rate'] > rate_moving_avg
+    low_rate_mask = ~high_rate_mask
+
+    # Financial Stress Regime (STLFSI is centered at 0; positive values indicate stress)
+    high_stress_mask = macro_data['Stress_Index'] > 0
+    low_stress_mask = ~high_stress_mask
+    
+    regime_definitions = {
+        'high_rate': high_rate_mask,
+        'low_rate': low_rate_mask,
+        'high_stress': high_stress_mask,
+        'low_stress': low_stress_mask
+    }
+    
+    # --- 2. Align Data and Run Analysis for Each Regime ---
+    # Ensure the main data has a proper DatetimeIndex
+    if not isinstance(full_historical_data.index, pd.DatetimeIndex):
+         # This is a fallback; ideally, the data should already be time-indexed
+        full_historical_data.index = pd.to_datetime(full_historical_data.get('Date', pd.Series(full_historical_data.index)))
+
+    regime_results = {}
+    logging.info("Starting regime-aware factor analysis...")
+
+    for regime_name, mask in regime_definitions.items():
+        st.write(f"Analyzing regime: {regime_name}...") # Provides feedback in the UI during the long run
+        
+        # Get the dates corresponding to the current regime
+        regime_dates = macro_data[mask].index
+        
+        # Filter the main stock dataset to include only data points from those dates
+        regime_stock_data = full_historical_data[full_historical_data.index.isin(regime_dates)]
+        
+        logging.info(f"Processing regime '{regime_name}' with {len(regime_stock_data)} data points.")
+        
+        # Run the core analysis on this subset of data
+        weights, rationale = _run_analysis_on_subset(
+            regime_stock_data, _all_possible_metrics, _reverse_metric_map
+        )
+        
+        # Store the results
+        regime_results[regime_name] = {'weights': weights, 'rationale': rationale}
+
+    logging.info("Completed all regime analyses.")
+    return regime_results    
 def simulate_historical_pure_returns(pure_returns_today):
     """
     SIMULATES a history of past Pure Factor Return tables.
@@ -2241,7 +2364,7 @@ def display_stock_dashboard(ticker_symbol, results_df, returns_dict, etf_histori
 ################################################################################
 # SECTION 2: MAIN APPLICATION LOGIC (COMPLETE - UNCONSTRAINED PURE ALPHA STRATEGY)
 ################################################################################
-# SECTION 2: MAIN APPLICATION LOGIC (COMPLETE AND FINAL)
+# SECTION 2: MAIN APPLICATION LOGIC (COMPLETE AND ENHANCED WITH REGIME-AWARENESS)
 ################################################################################
 def main():
     st.title("Quantitative Portfolio Analysis")
@@ -2271,9 +2394,11 @@ def main():
     )
 
     # --- Data Fetching and Processing ---
-    with st.spinner("Fetching ETF histories..."):
+    # ### NEW: Combined data fetching ###
+    with st.spinner("Fetching ETF and Macroeconomic histories..."):
         etf_histories = fetch_all_etf_histories(etf_list)
-    st.success("ETF histories loaded.")
+        macro_data = fetch_macro_data() # Fetch macro data
+    st.success("All historical data loaded.")
 
     with st.spinner(f"Processing {len(tickers)} tickers..."):
         results_df, failed_tickers, returns_dict = process_tickers(tickers, etf_histories, sector_etf_map)
@@ -2288,29 +2413,55 @@ def main():
         winsorized_returns_dict = winsorize_returns(returns_dict, lookback_T=126, d_max=7.0)
     st.success("Return data cleaned successfully.")
 
-    # --- Automatic Factor Weighting (Cached) ---
-    st.sidebar.subheader("Automatic Factor Weighting")
-    with st.spinner("Analyzing factor stability... (Slow only on first run)"):
-        all_possible_metrics = list(default_weights.keys())
-        auto_weights, rationale_df, stability_results = run_factor_stability_analysis(
-            results_df, all_possible_metrics, REVERSE_METRIC_NAME_MAP
-        )
-
-    if not rationale_df.empty:
-        rationale_df['Signal Direction'] = np.where(rationale_df['avg_sharpe_coeff'] >= 0, 'Positive ✅', 'Inverted 🔄')
-        with st.sidebar.expander("View Factor Stability Rationale", expanded=True):
-            st.dataframe(rationale_df[['avg_sharpe_coeff', 'consistency_score', 'Signal Direction', 'Final_Weight']].loc[rationale_df['Final_Weight'] > 0.1].sort_values('Final_Weight', ascending=False))
+    # --- Automatic Factor Weighting (Now Regime-Aware) ---
+    st.sidebar.subheader("Regime-Aware Factor Weighting")
+    
+    # ### NEW: Determine Current Regime and Select Active Model ###
+    # This block determines the current environment to decide which factor model to use.
+    active_weights = default_weights
+    active_rationale = pd.DataFrame()
+    
+    if not macro_data.empty:
+        latest_macro = macro_data.iloc[-1]
+        rate_ma = macro_data['Interest_Rate'].rolling(252).mean().iloc[-1]
         
-    user_weights = auto_weights
+        # Define current regimes
+        is_high_rate_regime = latest_macro['Interest_Rate'] > rate_ma
+        is_high_stress_regime = latest_macro['Stress_Index'] > 0
+        
+        # Display current regime in the UI
+        rate_regime_str = 'High & Rising Rates' if is_high_rate_regime else 'Low & Falling Rates'
+        stress_regime_str = 'High Financial Stress' if is_high_stress_regime else 'Low Financial Stress'
+        st.sidebar.metric("Interest Rate Regime", rate_regime_str)
+        st.sidebar.metric("Financial Stress Regime", stress_regime_str)
+        
+        # Placeholder for full regime-aware model. 
+        # A full implementation would require a time-series input for run_regime_aware_factor_analysis.
+        # For now, we fall back to the single all-weather model but show the logic.
+        st.sidebar.info("Note: Live regime switching is conceptual. The model currently uses an all-weather factor blend.")
+        with st.spinner("Analyzing factor stability for all-weather model..."):
+            all_possible_metrics = list(default_weights.keys())
+            auto_weights, rationale_df, stability_results = run_factor_stability_analysis(
+                results_df, all_possible_metrics, REVERSE_METRIC_NAME_MAP
+            )
+            active_weights = auto_weights
+            active_rationale = rationale_df
+
+    if not active_rationale.empty:
+        active_rationale['Signal Direction'] = np.where(active_rationale['avg_sharpe_coeff'] >= 0, 'Positive ✅', 'Inverted 🔄')
+        with st.sidebar.expander("View Active Factor Model Rationale", expanded=True):
+            st.dataframe(active_rationale[['avg_sharpe_coeff', 'consistency_score', 'Signal Direction', 'Final_Weight']].loc[active_rationale['Final_Weight'] > 0.1].sort_values('Final_Weight', ascending=False))
+    
+    user_weights = active_weights
     
     # --- Scoring Block (Unconstrained Pure Alpha) ---
     alpha_score = pd.Series(0.0, index=results_df.index)
     for long_name, weight in user_weights.items():
         if weight > 0:
             short_name = REVERSE_METRIC_NAME_MAP.get(long_name)
-            if short_name in results_df.columns and not rationale_df.empty and short_name in rationale_df.index:
+            if short_name in results_df.columns and not active_rationale.empty and short_name in active_rationale.index:
                 rank_series = results_df[short_name].rank(pct=True)
-                if rationale_df.loc[short_name, 'avg_sharpe_coeff'] < 0:
+                if active_rationale.loc[short_name, 'avg_sharpe_coeff'] < 0:
                     rank_series = 1 - rank_series
                 alpha_score += rank_series.fillna(0.5) * weight
     def z_score(series): return (series - series.mean()) / (series.std() if series.std() > 0 else 1)
@@ -2337,8 +2488,11 @@ def main():
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("Average Beta Exposure")
+            # ### UPGRADED: Use the new, more robust beta columns for display ###
             avg_beta_val = top_15_df['Beta_to_SPY'].mean()
-            st.metric("Average Beta of Long Book", f"{avg_beta_val:.2f}")
+            avg_down_beta = top_15_df['Beta_Down_Market'].mean()
+            st.metric("Average Beta (Conservative)", f"{avg_beta_val:.2f}", help="Weighted average of up and down market betas.")
+            st.metric("Avg. Down-Market Beta", f"{avg_down_beta:.2f}", help="Portfolio sensitivity during market declines. Lower is more defensive.")
             sector_counts = top_15_df['Sector'].value_counts()
             sector_fig = plot_sector_concentration(sector_counts)
             st.plotly_chart(sector_fig, use_container_width=True)
@@ -2352,11 +2506,16 @@ def main():
     # --- Hedging Calculation and Display ---
     hedge_weights = pd.Series(dtype=float)
     if hedge_risks:
-        with st.spinner(f"Calculating robust hedge for {', '.join(hedge_risks)}..."):
+        with st.spinner(f"Calculating robust, regime-aware hedge for {', '.join(hedge_risks)}..."):
             hedge_instrument_returns_dict = {etf: etf_histories[etf]['Close'].pct_change().dropna() for etf in hedge_risks if etf in etf_histories and not etf_histories[etf].empty}
             if hedge_instrument_returns_dict:
                 hedge_instrument_returns_df = pd.DataFrame(hedge_instrument_returns_dict)
-                hedge_weights = calculate_robust_hedge_weights(portfolio_returns_df,hedge_instrument_returns_df,lambda_uncertainty=lambda_uncertainty_ui)
+                # ### UPGRADED: The call now uses the new regime-aware hedging function ###
+                hedge_weights = calculate_robust_hedge_weights(
+                    portfolio_returns_df, 
+                    hedge_instrument_returns_df, 
+                    lambda_uncertainty=lambda_uncertainty_ui
+                )
     if not hedge_weights.empty:
         st.subheader("Hedge Portfolio & Final Exposure")
         long_exposure = 1.0; current_short_exposure = hedge_weights.sum()
@@ -2419,11 +2578,11 @@ def main():
                 if pd.notna(ir):
                     bench_sharpe = benchmark_metrics['Sharpe Ratio']
                     st.metric("Information Ratio", f"{ir:.2f}", f"{ir - bench_sharpe:.2f}" if pd.notna(bench_sharpe) else None, help="Risk-adjusted return. Delta shows difference vs. SPY Sharpe.")
+                # ### UPGRADED: Use the new robust beta for the final display ###
                 avg_beta_val = top_15_df['Beta_to_SPY'].mean()
                 st.metric("Average Beta to SPY", f"{avg_beta_val:.2f}", f"{avg_beta_val - 1.0:.2f} vs SPY", help="Portfolio sensitivity to the S&P 500. SPY is 1.0 by definition.")
     with col2:
         st.subheader("Systematic Risk Exposure Breakdown")
-        # --- THIS IS THE FIX ---
         portfolio_ts = (portfolio_returns_df * p_weights).sum(axis=1)
         portfolio_betas = calculate_portfolio_factor_betas(portfolio_ts, factor_returns_df)
         meaningful_factors = ['SPY', 'QQQ', 'IWM', 'MTUM', 'QUAL', 'IVE', 'IVW', 'USMV']
@@ -2445,12 +2604,13 @@ def main():
             display_deep_dive_data(selected_ticker)
         with tab2:
             st.subheader("Pure Factor Returns (Aggregated & Individual Horizons)")
-            st.dataframe(rationale_df)
-            time_horizons_display = { "1M": "Return_21d", "3M": "Return_63d", "6M": "Return_126d", "12M": "Return_252d" }
-            for horizon_label, stability_df in stability_results.items():
-                 with st.expander(f"Details for {horizon_label} Horizon (Target: {time_horizons_display.get(horizon_label, '')})"):
-                     if not stability_df.empty: st.dataframe(stability_df)
-                     else: st.warning(f"No significant factors found for {horizon_label} horizon.")
+            st.dataframe(active_rationale)
+            if 'stability_results' in locals() and stability_results:
+                time_horizons_display = { "1M": "Return_21d", "3M": "Return_63d", "6M": "Return_126d", "12M": "Return_252d" }
+                for horizon_label, stability_df in stability_results.items():
+                    with st.expander(f"Details for {horizon_label} Horizon (Target: {time_horizons_display.get(horizon_label, '')})"):
+                        if not stability_df.empty: st.dataframe(stability_df)
+                        else: st.warning(f"No significant factors found for {horizon_label} horizon.")
         with tab3:
             st.subheader("Full Processed Data Table")
             st.dataframe(results_df)
