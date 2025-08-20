@@ -207,6 +207,8 @@ def nearest_psd_matrix(matrix):
 # The corrected function
 # --- FINAL, ROBUST HEDGING FUNCTION (PREFERRED METHOD) ---
 
+# --- THIS IS THE CORRECT, FINAL FUNCTION ---
+
 def calculate_robust_hedge_weights(
     core_portfolio_returns, 
     hedge_instrument_returns, 
@@ -232,7 +234,7 @@ def calculate_robust_hedge_weights(
         logging.error(f"Market factor {market_factor_for_regime} not in hedge instruments. Falling back.")
         down_market_index = X.index
     else:
-        market_returns = X[market_factor_for_regime]
+        market_returns = X[market_factor_for_regime].fillna(0.0) # defensively fill NaNs here
         down_market_index = market_returns[market_returns < 0].index
         if len(down_market_index) < 30:
             logging.warning("Insufficient down-market days for regime hedge. Using full sample.")
@@ -247,19 +249,15 @@ def calculate_robust_hedge_weights(
     beta_variances = []
 
     for stock in y.columns:
-        # ### THIS IS THE "BETTER FEELING" FIX ###
         # Combine the data for this specific stock and drop any day where data is missing
         # for either the stock OR any of the hedge instruments.
         combined_regression_data = pd.concat([X_down, y_down[stock]], axis=1).dropna()
         
-        # Check if we have enough data left to run a stable regression
         if len(combined_regression_data) < 30:
-            # Not enough valid data for this stock, so we assume a zero beta and continue
             betas.append(np.zeros(X_down.shape[1]))
-            beta_variances.append(np.var(y_down[stock])) # Use the stock's own variance as uncertainty
+            beta_variances.append(np.var(y_down[stock].dropna())) # Drop NaNs before calculating variance
             continue
             
-        # Separate back into clean X and y for the regression
         X_clean = combined_regression_data[X_down.columns]
         y_clean = combined_regression_data[stock]
         
@@ -269,19 +267,17 @@ def calculate_robust_hedge_weights(
         
         residuals = y_clean - model.predict(X_clean)
         beta_variances.append(np.var(residuals))
-        # ###########################################
 
     B = np.array(betas)
     Omega_beta = np.diag(beta_variances)
 
     # 3. Construct Components for the Optimal Hedge Formula
-    # IMPORTANT: The covariance matrices should still be calculated on the FULL dataset
-    Sigma_hedge = X.cov().values.copy()
+    # IMPORTANT: The covariance matrices should still be calculated on the FULL dataset, but cleaned
+    Sigma_hedge = X.fillna(0.0).cov().values
     
     regularizer = B.T @ Omega_beta @ B
     robust_Sigma = Sigma_hedge + (lambda_uncertainty * regularizer)
     
-    # We must ensure the combined_df for this calculation is also clean
     combined_df = pd.concat([y, X], axis=1).fillna(0.0)
     full_cov_matrix = combined_df.cov()
     Sigma_core_hedge = full_cov_matrix.loc[y.columns, X.columns].values
