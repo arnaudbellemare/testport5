@@ -205,18 +205,20 @@ def nearest_psd_matrix(matrix):
         return np.eye(len(matrix))
 
 # The corrected function
+# --- FINAL, ROBUST HEDGING FUNCTION (PREFERRED METHOD) ---
+
 def calculate_robust_hedge_weights(
     core_portfolio_returns, 
     hedge_instrument_returns, 
     lambda_uncertainty=0.5,
-    market_factor_for_regime='SPY' ### CHANGE: Added parameter to define the market regime
+    market_factor_for_regime='SPY'
 ):
     """
     Calculates optimal hedge weights using a tracking error minimization framework
     that accounts for beta estimation uncertainty (regularization) and is calibrated
     to DOWN-MARKET regimes for maximum robustness.
     """
-    # 1. Align data and drop NaNs
+    # 1. Align data
     common_index = core_portfolio_returns.index.intersection(hedge_instrument_returns.index)
     if len(common_index) < 60:
         logging.warning("Insufficient data for robust hedging. Returning zero weights.")
@@ -225,14 +227,14 @@ def calculate_robust_hedge_weights(
     y = core_portfolio_returns.loc[common_index]
     X = hedge_instrument_returns.loc[common_index]
 
-    ### CHANGE: Define regimes based on the market factor
+    # Define regimes based on the market factor
     if market_factor_for_regime not in X.columns:
         logging.error(f"Market factor {market_factor_for_regime} not in hedge instruments. Falling back.")
-        down_market_index = X.index # Fallback to using all data
+        down_market_index = X.index
     else:
         market_returns = X[market_factor_for_regime]
         down_market_index = market_returns[market_returns < 0].index
-        if len(down_market_index) < 30: # Ensure enough data for stable estimates
+        if len(down_market_index) < 30:
             logging.warning("Insufficient down-market days for regime hedge. Using full sample.")
             down_market_index = X.index
 
@@ -245,26 +247,42 @@ def calculate_robust_hedge_weights(
     beta_variances = []
 
     for stock in y.columns:
-        # For each stock, regress its returns against ALL hedge instruments using down-market data
-        model = Ridge(alpha=0.1, fit_intercept=True).fit(X_down, y_down[stock])
+        # ### THIS IS THE "BETTER FEELING" FIX ###
+        # Combine the data for this specific stock and drop any day where data is missing
+        # for either the stock OR any of the hedge instruments.
+        combined_regression_data = pd.concat([X_down, y_down[stock]], axis=1).dropna()
+        
+        # Check if we have enough data left to run a stable regression
+        if len(combined_regression_data) < 30:
+            # Not enough valid data for this stock, so we assume a zero beta and continue
+            betas.append(np.zeros(X_down.shape[1]))
+            beta_variances.append(np.var(y_down[stock])) # Use the stock's own variance as uncertainty
+            continue
+            
+        # Separate back into clean X and y for the regression
+        X_clean = combined_regression_data[X_down.columns]
+        y_clean = combined_regression_data[stock]
+        
+        # Now we fit the model using only the clean, complete data
+        model = Ridge(alpha=0.1, fit_intercept=True).fit(X_clean, y_clean)
         betas.append(model.coef_)
         
-        # Estimate uncertainty from the residuals of this down-market regression
-        residuals = y_down[stock] - model.predict(X_down)
+        residuals = y_clean - model.predict(X_clean)
         beta_variances.append(np.var(residuals))
+        # ###########################################
 
     B = np.array(betas)
     Omega_beta = np.diag(beta_variances)
 
     # 3. Construct Components for the Optimal Hedge Formula
     # IMPORTANT: The covariance matrices should still be calculated on the FULL dataset
-    # to capture the overall risk structure, not just the down-market structure.
-    Sigma_hedge = X.cov().values
+    Sigma_hedge = X.cov().values.copy()
     
     regularizer = B.T @ Omega_beta @ B
     robust_Sigma = Sigma_hedge + (lambda_uncertainty * regularizer)
     
-    combined_df = pd.concat([y, X], axis=1)
+    # We must ensure the combined_df for this calculation is also clean
+    combined_df = pd.concat([y, X], axis=1).fillna(0.0)
     full_cov_matrix = combined_df.cov()
     Sigma_core_hedge = full_cov_matrix.loc[y.columns, X.columns].values
     sum_covariances = np.sum(Sigma_core_hedge, axis=0)
