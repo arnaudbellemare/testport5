@@ -323,7 +323,43 @@ def fetch_and_organize_deep_dive_data(_ticker_symbol):
         }
     except Exception as e: return {"Error": f"An error occurred: {e}"}
 # Place this in SECTION 1 with other function definitions
+# Place this in SECTION 1 with other function definitions
 
+def plot_factor_exposure_breakdown(portfolio_betas):
+    """
+    Creates an interactive bar chart showing the portfolio's exposure to different risk factors.
+    """
+    df = portfolio_betas.reset_index()
+    df.columns = ['Factor', 'Beta Exposure']
+    df = df.sort_values('Beta Exposure', key=abs, ascending=True)
+
+    colors = ['#00CC96' if val >= 0 else '#EF553B' for val in df['Beta Exposure']]
+    
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        y=df['Factor'],
+        x=df['Beta Exposure'],
+        orientation='h',
+        marker_color=colors,
+        hoverinfo='y+x',
+        hovertemplate='<b>Factor:</b> %{y}<br><b>Exposure (Beta):</b> %{x:.3f}<extra></extra>'
+    ))
+    
+    # Add a zero line for reference
+    fig.add_shape(type="line", x0=0, y0=-0.5, x1=0, y1=len(df)-0.5,
+                  line=dict(color="rgba(255, 255, 255, 0.5)", width=2))
+    
+    fig.update_layout(
+        title_text='Systematic Risk Exposure Breakdown',
+        xaxis_title='Portfolio Beta to Factor',
+        yaxis_title=None,
+        template='plotly_dark',
+        showlegend=False,
+        margin=dict(l=10, r=10, t=40, b=10),
+        xaxis=dict(showgrid=True, gridwidth=0.1, gridcolor='rgba(255, 255, 255, 0.1)'),
+        yaxis=dict(showgrid=False)
+    )
+    return fig
 def calculate_portfolio_factor_betas(portfolio_ts, factor_returns_df):
     """
     Calculates the portfolio's beta exposure to a set of factors using regression.
