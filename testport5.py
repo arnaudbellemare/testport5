@@ -2004,7 +2004,7 @@ def display_valuation_wizard(ticker_symbol):
 def get_correlated_stocks(selected_ticker, returns_dict, results_df, correlation_threshold=0.6):
     """
     Finds other tickers that are significantly correlated with the selected ticker,
-    enriches the data with key metrics, and calculates a pairs trade score.
+    enriches the data, and sorts them by the most statistically stretched Z-Score.
     """
     if selected_ticker not in returns_dict or len(returns_dict) < 2:
         return pd.DataFrame()
@@ -2024,23 +2024,18 @@ def get_correlated_stocks(selected_ticker, returns_dict, results_df, correlation
         
     corr_df = pd.DataFrame(significantly_correlated).rename(columns={selected_ticker: 'Correlation'})
 
-    # --- NEW: Add more insightful columns to fetch ---
     required_cols = ['Ticker', 'Relative_Z_Score', 'Piotroski_F-Score', 'PE_Ratio', 'Return_63d']
     if all(col in results_df.columns for col in required_cols):
         additional_info = results_df[required_cols].set_index('Ticker')
         corr_df = corr_df.join(additional_info)
-    else:
-        # Fallback if columns are missing
-        for col in required_cols:
-            if col != 'Ticker': corr_df[col] = np.nan
 
-    # --- NEW: Calculate the Pairs Trade Score ---
     selected_stock_z_score = results_df.set_index('Ticker').loc[selected_ticker, 'Relative_Z_Score']
     corr_df['Z_Score_Divergence'] = (corr_df['Relative_Z_Score'] - selected_stock_z_score).abs()
     corr_df['Pairs_Score'] = corr_df['Correlation'].abs() * corr_df['Z_Score_Divergence']
 
-    # Sort by the new Pairs Score for maximum insight
-    corr_df_sorted = corr_df.sort_values('Pairs_Score', ascending=False)
+    # --- THE FIX: Revert sorting back to the absolute Z-Score ---
+    # This prioritizes showing the most overbought/oversold peers at the top.
+    corr_df_sorted = corr_df.reindex(corr_df['Relative_Z_Score'].abs().fillna(0).sort_values(ascending=False).index)
 
     return corr_df_sorted
 
@@ -2093,48 +2088,45 @@ def display_stock_dashboard(ticker_symbol, results_df, returns_dict, etf_histori
         display_momentum_bar(ticker_symbol, daily_history)
 
     with col2:
-        st.subheader(f"Actionable Peer Analysis (90d)") # Renamed for clarity
+        st.subheader(f"Actionable Peer Analysis (90d)")
         
         correlated_stocks_df = get_correlated_stocks(ticker_symbol, returns_dict, results_df)
 
         if not correlated_stocks_df.empty:
-            # --- NEW: Define the columns to display ---
             display_cols = [
-                'Pairs_Score', 
                 'Correlation', 
                 'Relative_Z_Score', 
                 'Piotroski_F-Score', 
                 'PE_Ratio', 
-                'Return_63d'
+                'Return_63d',
+                'Pairs_Score'
             ]
             
             st.dataframe(
                 correlated_stocks_df[display_cols],
                 use_container_width=True,
-                # --- NEW: Use column_config for a professional look ---
                 column_config={
-                    "Pairs_Score": st.column_config.ProgressColumn(
-                        "Pairs Score",
-                        help="Highlights potential pairs trades. Higher score = High Correlation + High Z-Score Divergence.",
-                        format="%.2f",
-                        min_value=0,
-                        max_value=max(correlated_stocks_df['Pairs_Score'].max(), 3), # Dynamic max
-                    ),
                     "Correlation": st.column_config.NumberColumn(format="%.2f"),
                     "Relative_Z_Score": st.column_config.NumberColumn("Z-Score", format="%.2f"),
-                    "Piotroski_F-Score": st.column_config.ProgressColumn(
+                    # --- THE FIX: Use a BarChartColumn for a non-percentage visual ---
+                    "Piotroski_F-Score": st.column_config.BarChartColumn(
                         "F-Score",
                         help="Fundamental health score (0-9). Higher is better.",
-                        min_value=0,
-                        max_value=9,
+                        width="small",
+                        y_min=0,
+                        y_max=9,
                     ),
                     "PE_Ratio": st.column_config.NumberColumn("P/E Ratio", format="%.1f"),
                     "Return_63d": st.column_config.NumberColumn("3-Mo Return", format="%.1f%%"),
+                    "Pairs_Score": st.column_config.NumberColumn(
+                        "Pairs Score",
+                        help="Highlights potential pairs trades. = Correlation * |Z-Score Divergence|.",
+                        format="%.2f"
+                    ),
                 }
             )
         else:
             st.info(f"No stocks found with a 90-day correlation to {ticker_symbol} of 0.6 or higher.")
-
 ################################################################################
 # SECTION 2: MAIN APPLICATION LOGIC (CORRECTED)
 ################################################################################
