@@ -2009,6 +2009,8 @@ def display_stock_dashboard(ticker_symbol, results_df, returns_dict, etf_histori
 ################################################################################
 # SECTION 2: MAIN APPLICATION LOGIC (COMPLETE, WITH WINSORIZATION AND ALL FIXES)
 ################################################################################
+# SECTION 2: MAIN APPLICATION LOGIC (PURE ALPHA STRATEGY VERSION)
+################################################################################
 def main():
     st.title("Quantitative Portfolio Analysis")
     st.sidebar.header("Controls")
@@ -2021,10 +2023,6 @@ def main():
     weighting_method_ui = st.sidebar.selectbox(
         "Portfolio Weighting Method",
         ["Equal Weight", "Inverse Volatility", "Log Log Sharpe Optimized"]
-    )
-    risk_weight_ui = st.sidebar.slider(
-        "Risk Penalty Weight in Scoring", 0.0, 0.5, 0.2, 0.05,
-        help="How much to penalize stocks for high volatility and debt in the initial ranking. 0 = no penalty."
     )
     corr_window = st.sidebar.slider("Correlation Window (days)", 30, 180, 90, 30)
     
@@ -2054,7 +2052,6 @@ def main():
     if failed_tickers:
         st.expander("Show Failed Tickers").warning(f"{len(failed_tickers)} tickers failed: {', '.join(failed_tickers)}")
 
-    # --- WINSORIZATION STEP ---
     with st.spinner("Applying Winsorization to clean return data..."):
         winsorized_returns_dict = winsorize_returns(returns_dict, lookback_T=126, d_max=7.0)
     st.success("Return data cleaned successfully.")
@@ -2072,23 +2069,21 @@ def main():
         
     user_weights = auto_weights
     
-    # --- Risk-Managed Scoring Block ---
+    # --- SCORING BLOCK (PURE ALPHA - NO RISK PENALTY) ---
     alpha_score = pd.Series(0.0, index=results_df.index)
     for long_name, weight in user_weights.items():
         if weight > 0:
             short_name = REVERSE_METRIC_NAME_MAP.get(long_name)
             if short_name in results_df.columns and not rationale_df.empty and short_name in rationale_df.index:
+                # Still using sector-neutral ranking for diversification benefit
                 rank_series = results_df.groupby('Sector')[short_name].rank(pct=True)
                 if rationale_df.loc[short_name, 'avg_sharpe_coeff'] < 0:
                     rank_series = 1 - rank_series
                 alpha_score += rank_series.fillna(0.5) * weight
-    risk_factors = {'GARCH_Vol': 1.0, 'Debt_Ratio': 0.5}
-    risk_score = pd.Series(0.0, index=results_df.index)
-    for factor, weight in risk_factors.items():
-        risk_score += results_df[factor].rank(pct=True).fillna(0.5) * weight
-    final_raw_score = alpha_score * (1 - risk_weight_ui) - risk_score * risk_weight_ui
+
+    # Use the alpha_score directly, without subtracting a risk penalty
     def z_score(series): return (series - series.mean()) / (series.std() if series.std() > 0 else 1)
-    results_df['Score'] = z_score(final_raw_score)
+    results_df['Score'] = z_score(alpha_score)
     top_15_df = results_df.sort_values('Score', ascending=False).head(15).copy()
     top_15_tickers = top_15_df['Ticker'].tolist()
 
@@ -2096,7 +2091,7 @@ def main():
     st.header("📈 Portfolio Overview & Hedging")
     if not top_15_tickers:
         st.warning("No stocks for portfolio construction."); st.stop()
-    
+        
     # --- Core Portfolio Construction (uses winsorized data) ---
     st.subheader(f"Core Portfolio (Long Book): Weights by {weighting_method_ui}")
     portfolio_returns_df = pd.DataFrame(winsorized_returns_dict).reindex(columns=top_15_tickers).dropna(how='all')
@@ -2119,10 +2114,8 @@ def main():
             st.write("Top 5 Correlated Factor ETFs:")
             st.dataframe(factor_correlations.head(5), column_config={"value": st.column_config.NumberColumn(format="%.4f")})
             st.bar_chart(factor_correlations.head(10))
-        else:
-            st.warning("Could not calculate factor correlations.")
 
-    # --- Hedging Calculation (uses winsorized data) ---
+    # --- Hedging Calculation and Display with Scaling ---
     hedge_weights = pd.Series(dtype=float)
     if hedge_risks:
         with st.spinner(f"Calculating robust hedge for {', '.join(hedge_risks)}..."):
@@ -2151,7 +2144,7 @@ def main():
     
     st.divider()
 
-    # --- Portfolio Performance Metrics (uses winsorized data) ---
+    # --- Portfolio Performance Metrics ---
     st.subheader("📊 Portfolio Strategy Performance Metrics")
     spy_returns = etf_histories['SPY']['Close'].pct_change().dropna()
     common_idx = portfolio_returns_df.index.intersection(spy_returns.index)
@@ -2184,6 +2177,7 @@ def main():
         tab1, tab2, tab3 = st.tabs(["🔬 Stock Dashboard & Financials", "🎛️ Factor Analysis", "📄 Full Data Table"])
         with tab1:
             display_stock_dashboard(selected_ticker, results_df, winsorized_returns_dict, etf_histories)
+            display_deep_dive_data(selected_ticker)
         with tab2:
             st.subheader("Pure Factor Returns (Aggregated & Individual Horizons)")
             st.dataframe(rationale_df)
