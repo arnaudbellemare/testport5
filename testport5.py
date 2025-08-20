@@ -2510,11 +2510,18 @@ def main():
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("Average Beta Exposure")
-            # ### UPGRADED: Use the new, more robust beta columns for display ###
+    
+    # --- ADD THESE TWO DIAGNOSTIC LINES ---
+            st.write("Columns available in top_15_df:")
+            st.write(top_15_df.columns)
+    # ----------------------------------------
+    
+    # ### UPGRADED: Use the new, more robust beta columns for display ###
             avg_beta_val = top_15_df['Beta_to_SPY'].mean()
-            avg_down_beta = top_15_df['Beta_Down_Market'].mean()
+            avg_down_beta = top_15_df['Beta_Down_Market'].mean() # This is the line that errors
             st.metric("Average Beta (Conservative)", f"{avg_beta_val:.2f}", help="Weighted average of up and down market betas.")
             st.metric("Avg. Down-Market Beta", f"{avg_down_beta:.2f}", help="Portfolio sensitivity during market declines. Lower is more defensive.")
+    
             sector_counts = top_15_df['Sector'].value_counts()
             sector_fig = plot_sector_concentration(sector_counts)
             st.plotly_chart(sector_fig, use_container_width=True)
