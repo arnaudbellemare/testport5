@@ -2066,10 +2066,12 @@ def display_valuation_wizard(ticker_symbol):
                 res_col3.info(commentary)
         else:
             st.error(f"Valuation Failed. Reason: {commentary}")
-def get_correlated_stocks(selected_ticker, returns_dict, results_df, correlation_threshold=0.6):
+# Place this in SECTION 1 with other function definitions
+
+def get_correlated_stocks(selected_ticker, returns_dict, results_df, correlation_threshold=None):
     """
-    Finds other tickers that are significantly correlated with the selected ticker,
-    enriches the data, and calculates a pairs trade score.
+    Finds other tickers correlated with the selected ticker. If a threshold is provided,
+    it filters by correlation first. It enriches the data and calculates a pairs score.
     """
     if selected_ticker not in returns_dict or len(returns_dict) < 2:
         return pd.DataFrame()
@@ -2083,23 +2085,30 @@ def get_correlated_stocks(selected_ticker, returns_dict, results_df, correlation
     if selected_ticker not in recent_returns.columns: return pd.DataFrame()
 
     correlations_to_selected = recent_returns.corr()[selected_ticker].drop(selected_ticker, errors='ignore')
-    significantly_correlated = correlations_to_selected[correlations_to_selected.abs() >= correlation_threshold]
+    
+    # --- KEY CHANGE: Conditional Filtering ---
+    if correlation_threshold is not None:
+        # If a threshold is given, filter for high correlation first
+        corr_df = correlations_to_selected[correlations_to_selected.abs() >= correlation_threshold].to_frame()
+    else:
+        # Otherwise, consider all stocks
+        corr_df = correlations_to_selected.to_frame()
 
-    if significantly_correlated.empty: return pd.DataFrame()
+    if corr_df.empty: return pd.DataFrame()
         
-    corr_df = pd.DataFrame(significantly_correlated).rename(columns={selected_ticker: 'Correlation'})
+    corr_df = corr_df.rename(columns={selected_ticker: 'Correlation'})
 
-    # --- SIMPLIFIED: Removed F-Score from the required columns ---
+    # Enrich with additional data
     required_cols = ['Ticker', 'Relative_Z_Score', 'PE_Ratio', 'Return_63d']
     if all(col in results_df.columns for col in required_cols):
         additional_info = results_df[required_cols].set_index('Ticker')
         corr_df = corr_df.join(additional_info)
 
+    # Calculate the Pairs Trade Score
     selected_stock_z_score = results_df.set_index('Ticker').loc[selected_ticker, 'Relative_Z_Score']
     corr_df['Z_Score_Divergence'] = (corr_df['Relative_Z_Score'] - selected_stock_z_score).abs()
     corr_df['Pairs_Score'] = corr_df['Correlation'].abs() * corr_df['Z_Score_Divergence']
 
-    # The function will now return the unsorted data; sorting will be handled in the UI.
     return corr_df
 
 def display_stock_dashboard(ticker_symbol, results_df, returns_dict, etf_histories):
@@ -2154,7 +2163,6 @@ def display_stock_dashboard(ticker_symbol, results_df, returns_dict, etf_histori
     with col2:
         st.subheader(f"Actionable Peer Analysis (90d)")
         
-        # --- NEW: Add a UI control to choose the sorting method ---
         sort_by = st.radio(
             "Sort Peers By:",
             ('Pairs Score (Best Opportunities)', 'Correlation (Truest Peers)'),
@@ -2162,16 +2170,19 @@ def display_stock_dashboard(ticker_symbol, results_df, returns_dict, etf_histori
             label_visibility="collapsed"
         )
         
-        correlated_stocks_df = get_correlated_stocks(ticker_symbol, returns_dict, results_df)
+        # --- KEY CHANGE: Dynamic Function Calls and Sorting ---
+        if sort_by == 'Pairs Score (Best Opportunities)':
+            # Call the function WITHOUT a threshold to search the whole market
+            correlated_stocks_df = get_correlated_stocks(ticker_symbol, returns_dict, results_df)
+            # Sort the full results by the Pairs Score
+            final_df = correlated_stocks_df.sort_values('Pairs_Score', ascending=False).head(15) # Show top 15 opportunities
+        else: # Sort by Correlation
+            # Call the function WITH a threshold to find only true peers
+            correlated_stocks_df = get_correlated_stocks(ticker_symbol, returns_dict, results_df, correlation_threshold=0.6)
+            # Sort the filtered results by Correlation
+            final_df = correlated_stocks_df.sort_values('Correlation', key=abs, ascending=False).head(15) # Show top 15 peers
 
-        if not correlated_stocks_df.empty:
-            # --- NEW: Dynamic Sorting ---
-            if sort_by == 'Pairs Score (Best Opportunities)':
-                final_df = correlated_stocks_df.sort_values('Pairs_Score', ascending=False)
-            else: # Sort by Correlation
-                final_df = correlated_stocks_df.sort_values('Correlation', key=abs, ascending=False)
-            
-            # --- SIMPLIFIED: Removed F-Score from the display ---
+        if not final_df.empty:
             display_cols = [
                 'Correlation', 
                 'Relative_Z_Score', 
@@ -2198,7 +2209,7 @@ def display_stock_dashboard(ticker_symbol, results_df, returns_dict, etf_histori
                 }
             )
         else:
-            st.info(f"No stocks found with a 90-day correlation to {ticker_symbol} of 0.6 or higher.")
+            st.info(f"No significant peers found based on the selected criteria.")
 ################################################################################
 # SECTION 2: MAIN APPLICATION LOGIC (CORRECTED)
 ################################################################################
