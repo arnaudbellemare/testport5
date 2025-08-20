@@ -535,21 +535,21 @@ def calculate_fmp_weights(returns_df, new_factor_returns, cov_matrix, existing_f
     except Exception as e:
         logging.error(f"Error in FMP calculation: {e}")
         return pd.Series(np.ones(len(returns_df.columns)) / len(returns_df.columns), index=returns_df.columns)
+# Place this in SECTION 1 with other function definitions
+# (The other new function, plot_factor_correlations, is fine)
+
 def plot_sector_concentration(sector_counts):
     """
     Creates a colorful and interactive horizontal bar chart for sector concentration using Plotly.
     """
-    # Create a dataframe from the series for easier plotting
     df = sector_counts.reset_index()
     df.columns = ['Sector', 'Count']
     
-    # Generate a color map for the sectors
-    colors = px.colors.qualitative.Plotly # A nice, distinct color palette
+    colors = px.colors.qualitative.Plotly
     num_colors = len(colors)
     sector_color_map = {sector: colors[i % num_colors] for i, sector in enumerate(df['Sector'])}
     
     fig = go.Figure()
-
     fig.add_trace(go.Bar(
         y=df['Sector'],
         x=df['Count'],
@@ -561,16 +561,20 @@ def plot_sector_concentration(sector_counts):
         hovertemplate='<b>Sector:</b> %{y}<br><b>Count:</b> %{x}<extra></extra>'
     ))
 
+    # --- THIS IS THE CORRECTED PART ---
     fig.update_layout(
         title_text='Sector Concentration in Long Book',
         xaxis_title='Number of Stocks',
         yaxis_title=None,
-        yaxis=dict(autorange="reversed"), # Show the highest count at the top
         template='plotly_dark',
         showlegend=False,
         margin=dict(l=10, r=10, t=40, b=10),
         xaxis=dict(showgrid=False),
-        yaxis=dict(showgrid=False)
+        # All yaxis properties are now in one dictionary
+        yaxis=dict(
+            autorange="reversed",
+            showgrid=False
+        )
     )
     return fig
 
