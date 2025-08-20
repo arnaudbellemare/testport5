@@ -2068,7 +2068,7 @@ def display_valuation_wizard(ticker_symbol):
             st.error(f"Valuation Failed. Reason: {commentary}")
 # Place this in SECTION 1 with other function definitions
 
-def get_correlated_stocks(selected_ticker, returns_dict, results_df, correlation_threshold=None):
+def get_correlated_stocks(selected_ticker, returns_dict, results_df, correlation_threshold=0.40):
     """
     Finds other tickers correlated with the selected ticker. If a threshold is provided,
     it filters by correlation first. It enriches the data and calculates a pairs score.
